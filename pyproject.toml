@@ -54,9 +54,15 @@ exclude = ["cutamp/robots/assets"]
 cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
 cutamp-collect-retrieval = "cutamp.scripts.collect_retrieval_data:entrypoint"
 cutamp-benchmark-retrieval = "cutamp.scripts.benchmark_retrieval:entrypoint"
+cutamp-vlm-demo = "cutamp.scripts.run_vlm_tamp:entrypoint"
 
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }
+
+[tool.uv]
+no-build-isolation-package = [
+    "causal-conv1d",
+]
 
 [tool.uv.sources]
 torchaudio = { index = "torch" }
@@ -78,4 +84,4 @@ name = "pypi"
 url = "https://pypi.org/simple"
 
 [tool.uv.extra-build-dependencies]
-curobo = ["torch"]
+nvidia-curobo = ["torch"]

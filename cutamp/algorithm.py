@@ -11,8 +11,9 @@
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Union, Optional, Tuple
+from typing import Any, List, Union, Optional, Tuple
 from unittest.mock import Mock
 
 import torch
@@ -22,7 +23,7 @@ from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_function import CostFunction
 from cutamp.cost_reduction import CostReducer
-from cutamp.envs.utils import TAMPEnvironment
+from cutamp.envs.utils import TAMPEnvironment, clone_tamp_environment, set_object_pose
 from cutamp.experiment_logger import ExperimentLogger
 from cutamp.motion_solver import solve_curobo
 from cutamp.optimize_plan import ParticleOptimizer
@@ -33,10 +34,26 @@ from cutamp.rollout import RolloutFunction
 from cutamp.tamp_domain import all_tamp_operators
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
+from cutamp.utils.common import Particles, mat4x4_to_pose_list
 from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class CutampRunResult:
+    curobo_plan: Any
+    num_satisfying_final: int
+    found_solution: bool
+    best_particle: Optional[Particles]
+    final_rollout: Optional[dict]
+    final_env: Optional[TAMPEnvironment]
+    final_q_init: Optional[torch.Tensor]
+    final_plan_skeleton: Optional[list[str]]
+    overall_metrics: dict
+    timer_summaries: dict
+    collision_summary: dict[str, float]
 
 
 def _sync_perf_counter() -> float:
@@ -49,6 +66,39 @@ def _metric_total(timer_summaries: dict, name: str) -> float:
     if metric is None:
         return 0.0
     return float(metric["total"])
+
+
+def _summarize_collision_costs(cost_dict: dict) -> dict[str, float]:
+    collision_info = cost_dict.get("Collision")
+    if collision_info is None:
+        return {}
+
+    values = collision_info.get("values", {})
+    summary = {}
+    for name, tensor in values.items():
+        summary[name] = float(tensor.detach().mean().item())
+    return summary
+
+
+def _get_plan_collision_summary(plan_info: Optional[dict]) -> dict[str, float]:
+    if plan_info is None:
+        return {}
+
+    particles = plan_info["particles"]
+    rollout_fn = plan_info["rollout_fn"]
+    cost_fn = plan_info["cost_fn"]
+    with torch.no_grad():
+        rollout = rollout_fn(particles)
+        cost_dict = cost_fn(rollout)
+    return _summarize_collision_costs(cost_dict)
+
+
+def _build_final_environment(world: TAMPWorld, final_rollout: dict) -> TAMPEnvironment:
+    final_env = clone_tamp_environment(world.env)
+    for obj_name, poses in final_rollout["obj_to_pose"].items():
+        last_pose = poses[0, -1].detach().cpu()
+        set_object_pose(final_env, obj_name, mat4x4_to_pose_list(last_pose))
+    return final_env
 
 
 def _build_timing_breakdown(timer_summaries: dict, plan_timing_rows: list[dict], overall_metrics: dict) -> dict:
@@ -471,6 +521,11 @@ def run_cutamp(
     curobo_plan = None
     found_solution = False
     final_plan_info = None
+    final_best_particle = None
+    final_rollout = None
+    final_env = None
+    final_q_init = None
+    failure_plan_info = None
     particle_optimizer = ParticleOptimizer(config, cost_reducer, constraint_checker)
     timer.start("first_solution")
     if found_solution_initially:
@@ -640,6 +695,12 @@ def run_cutamp(
         if has_satisfying:
             found_solution = True
             final_plan_info = plan_info
+            if best_particle is None:
+                best_particle = get_best_particle(plan_info, config, constraint_checker, cost_reducer)
+            final_best_particle = best_particle
+            final_rollout = plan_info["rollout_fn"]({k: v[None].detach().clone() for k, v in best_particle.items()})
+            final_env = _build_final_environment(world, final_rollout)
+            final_q_init = final_rollout["confs"][0, -1].detach().clone()
             if config.curobo_plan:
                 curobo_plan = solve_curobo(
                     plan_info,
@@ -655,6 +716,8 @@ def run_cutamp(
             _log.debug(f"Total num satisfying {metrics['num_satisfying_final']}")
             if config.break_on_satisfying:
                 should_break = True
+        else:
+            failure_plan_info = plan_info
 
         if should_break:
             break
@@ -689,4 +752,17 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, overall_metrics["num_satisfying_final"]
+    collision_summary = _get_plan_collision_summary(final_plan_info if found_solution else failure_plan_info)
+    return CutampRunResult(
+        curobo_plan=curobo_plan,
+        num_satisfying_final=overall_metrics["num_satisfying_final"],
+        found_solution=found_solution,
+        best_particle=final_best_particle,
+        final_rollout=final_rollout,
+        final_env=final_env,
+        final_q_init=final_q_init,
+        final_plan_skeleton=overall_metrics.get("final_plan_skeleton"),
+        overall_metrics=overall_metrics,
+        timer_summaries=timer_summaries,
+        collision_summary=collision_summary,
+    )

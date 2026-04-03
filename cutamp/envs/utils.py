@@ -9,7 +9,7 @@
 
 import os
 import warnings
-from typing import Dict, List, ClassVar, Set, Tuple
+from typing import Dict, List, ClassVar, Iterable, Set, Tuple
 
 import torch
 import yaml
@@ -94,6 +94,12 @@ def load_env(env_path: str) -> TAMPEnvironment:
     with open(env_path, "r") as f:
         env_dict = yaml.load(f, Loader=yaml.SafeLoader)
 
+    return load_env_from_dict(env_dict)
+
+
+def load_env_from_dict(env_dict: dict) -> TAMPEnvironment:
+    """Load the environment from a dictionary representation."""
+
     # Make sure expected keys are present
     for key in ["name", "geometries", "types"]:
         if key not in env_dict:
@@ -152,6 +158,57 @@ def load_env(env_path: str) -> TAMPEnvironment:
         goal_state=goal_state,
     )
     return env
+
+
+def clone_tamp_environment(env: TAMPEnvironment) -> TAMPEnvironment:
+    """Clone an environment through its serializable dictionary representation."""
+    return load_env_from_dict(get_env_dict(env))
+
+
+def replace_goal_state(env: TAMPEnvironment, goal_state: State) -> TAMPEnvironment:
+    """Clone an environment and replace its goal state."""
+    cloned = clone_tamp_environment(env)
+    cloned.goal_state = goal_state
+    return cloned
+
+
+def set_object_pose(env: TAMPEnvironment, obj_name: str, pose: List[float]) -> None:
+    """Set the pose of an object in-place."""
+    for obj in env.movables + env.statics:
+        if obj.name == obj_name:
+            obj.pose = list(pose)
+            return
+    raise ValueError(f"Object {obj_name} not found in environment {env.name}")
+
+
+def reduce_tamp_environment(
+    env: TAMPEnvironment, movable_names: Iterable[str], goal_state: State | None = None
+) -> TAMPEnvironment:
+    """
+    Clone an environment while demoting non-relevant movable objects into static obstacles.
+    This preserves geometry for collision checking while shrinking the symbolic movable set.
+    """
+    keep_movable_names = set(movable_names)
+    reduced = clone_tamp_environment(env)
+
+    new_movables = [obj for obj in reduced.movables if obj.name in keep_movable_names]
+    demoted = [obj for obj in reduced.movables if obj.name not in keep_movable_names]
+    reduced.movables = new_movables
+    reduced.statics = [*reduced.statics, *demoted]
+
+    new_type_to_objects = {}
+    for obj_type, objects in reduced.type_to_objects.items():
+        if obj_type in {"Movable", "Stick"}:
+            filtered = [obj for obj in objects if obj.name in keep_movable_names]
+        else:
+            filtered = list(objects)
+        if filtered:
+            new_type_to_objects[obj_type] = filtered
+    reduced.type_to_objects = new_type_to_objects
+
+    if goal_state is not None:
+        reduced.goal_state = goal_state
+    return reduced
 
 
 def _get_object_dict(obj: Obstacle) -> Tuple[str, dict]:

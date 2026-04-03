@@ -43,6 +43,48 @@ def pose_list_to_mat4x4(pose: list[float] | None) -> Float[torch.Tensor, "4 4"]:
     return mat4x4
 
 
+def _rotmat_to_quat_wxyz(rotmat: Float[torch.Tensor, "3 3"]) -> Float[torch.Tensor, "4"]:
+    """Convert a rotation matrix to a unit quaternion in wxyz ordering."""
+    m = rotmat
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+
+    if trace > 0:
+        s = torch.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (m[2, 1] - m[1, 2]) / s
+        qy = (m[0, 2] - m[2, 0]) / s
+        qz = (m[1, 0] - m[0, 1]) / s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = torch.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        qw = (m[2, 1] - m[1, 2]) / s
+        qx = 0.25 * s
+        qy = (m[0, 1] + m[1, 0]) / s
+        qz = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = torch.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        qw = (m[0, 2] - m[2, 0]) / s
+        qx = (m[0, 1] + m[1, 0]) / s
+        qy = 0.25 * s
+        qz = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = torch.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        qw = (m[1, 0] - m[0, 1]) / s
+        qx = (m[0, 2] + m[2, 0]) / s
+        qy = (m[1, 2] + m[2, 1]) / s
+        qz = 0.25 * s
+
+    quat = torch.stack([qw, qx, qy, qz])
+    quat = quat / quat.norm(p=2).clamp(min=1e-8)
+    return quat
+
+
+def mat4x4_to_pose_list(mat4x4: Float[torch.Tensor, "4 4"]) -> list[float]:
+    """Convert a 4x4 transformation matrix to a cuRobo-style pose list [x y z qw qx qy qz]."""
+    translation = mat4x4[:3, 3]
+    quat_wxyz = _rotmat_to_quat_wxyz(mat4x4[:3, :3])
+    return [*translation.tolist(), *quat_wxyz.tolist()]
+
+
 def action_4dof_to_mat4x4(action_4dof: Float[torch.Tensor, "*b 4"]) -> Float[torch.Tensor, "*b 4 4"]:
     """Convert 4-DOF action to 4x4 transformation matrix."""
     if action_4dof.shape[-1] != 4:

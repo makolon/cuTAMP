@@ -124,6 +124,31 @@ class TAMPConfiguration:
     # Whether to save warm-start artifacts for future retrieval.
     save_retrieval_artifacts: bool = True
 
+    ## VLM-TAMP
+    # Whether to run the VLM-guided subgoal planning pipeline.
+    enable_vlm_tamp: bool = False
+    # Natural language goal given to the VLM.
+    open_goal: Optional[str] = None
+    # Hugging Face model identifier for the multimodal VLM.
+    vlm_model_name: str = "Qwen/Qwen3.5-9B"
+    # Inference backend used to query the VLM.
+    vlm_backend: Literal["transformers", "stub"] = "transformers"
+    # Device and dtype for VLM inference.
+    vlm_device: str = "cuda"
+    vlm_dtype: str = "bfloat16"
+    # Text generation parameters for the VLM.
+    vlm_max_new_tokens: int = 512
+    vlm_temperature: float = 0.0
+    vlm_do_sample: bool = False
+    # Number of reprompt rounds after the initial VLM response.
+    vlm_max_reprompts: int = 2
+    # Render style used for VLM query images.
+    vlm_render_style: Literal["simple_annotated"] = "simple_annotated"
+    # Whether to reduce planning objects for each subgoal.
+    vlm_enable_object_reduction: bool = True
+    # Optional cache directory for VLM responses.
+    vlm_cache_dir: Optional[str] = None
+
 
 def validate_tamp_config(config: TAMPConfiguration):
     if config.seed is not None and config.seed < 0:
@@ -195,6 +220,23 @@ def validate_tamp_config(config: TAMPConfiguration):
             "retrieval_min_approx_saved_particles must be positive when retrieval is enabled, "
             f"not {config.retrieval_min_approx_saved_particles}"
         )
+
+    # VLM-TAMP
+    if config.enable_vlm_tamp:
+        if config.open_goal is None or not config.open_goal.strip():
+            raise ValueError("open_goal must be provided when VLM-TAMP is enabled")
+        if config.vlm_backend not in {"transformers", "stub"}:
+            raise ValueError(f"Unsupported vlm_backend: {config.vlm_backend}")
+        if config.vlm_dtype not in {"float16", "bfloat16", "float32"}:
+            raise ValueError(f"Unsupported vlm_dtype: {config.vlm_dtype}")
+        if config.vlm_max_new_tokens <= 0:
+            raise ValueError(f"vlm_max_new_tokens must be positive, not {config.vlm_max_new_tokens}")
+        if config.vlm_temperature < 0:
+            raise ValueError(f"vlm_temperature must be non-negative, not {config.vlm_temperature}")
+        if config.vlm_max_reprompts < 0:
+            raise ValueError(f"vlm_max_reprompts must be non-negative, not {config.vlm_max_reprompts}")
+        if config.vlm_render_style not in {"simple_annotated"}:
+            raise ValueError(f"Unsupported vlm_render_style: {config.vlm_render_style}")
 
     # Collision checking
     if config.coll_n_spheres <= 0:
