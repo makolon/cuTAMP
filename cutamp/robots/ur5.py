@@ -39,7 +39,6 @@ def ur5_curobo_cfg() -> dict:
         if key not in cfg["robot_cfg"]["kinematics"]:
             cfg["robot_cfg"]["kinematics"][key] = str(assets_dir)
     return cfg
-    # return load_yaml(join_path(get_robot_configs_path(), "ur5e_robotiq_2f_140.yml"))
 
 
 def _ur5_cfg_dict() -> dict:

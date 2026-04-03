@@ -15,18 +15,34 @@ import hashlib
 import json
 import re
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+
+import torch
+from PIL import Image
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+from transformers.models.qwen3_5 import modeling_qwen3_5
 
 from cutamp.config import TAMPConfiguration
 
 _THINK_TAG_PATTERN = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
+_TORCH_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
 
 
 def strip_thinking_tokens(text: str) -> str:
-    """Remove Qwen-style thinking traces from the generated output."""
+    """Remove Qwen-style thinking traces from generated text."""
     return _THINK_TAG_PATTERN.sub("", text).strip()
+
+
+def configure_qwen3_5_runtime() -> None:
+    """Force Qwen3.5 to use the built-in torch gated-delta implementation."""
+    modeling_qwen3_5.chunk_gated_delta_rule = None
+    modeling_qwen3_5.fused_recurrent_gated_delta_rule = None
+    modeling_qwen3_5.FusedRMSNormGated = None
+    modeling_qwen3_5.is_fast_path_available = False
 
 
 class BaseVLMClient(ABC):
@@ -37,61 +53,19 @@ class BaseVLMClient(ABC):
         """Generate a response for the given prompt and optional image."""
 
 
-class StubVLMClient(BaseVLMClient):
-    """
-    Lightweight stub client for testing.
-
-    Responses can be specified as:
-    - a flat iterable used as a global queue
-    - a mapping from stage name to iterables
-    - a callable `(prompt, image_path, stage) -> str`
-    """
-
-    def __init__(
-        self,
-        responses: (
-            Iterable[str]
-            | dict[str, Iterable[str]]
-            | Callable[[str, str | None, str], str]
-            | None
-        ) = None,
-    ):
-        self._callable = responses if callable(responses) else None
-        self._global_queue = deque()
-        self._stage_queues: dict[str, deque[str]] = defaultdict(deque)
-
-        if responses is None or callable(responses):
-            return
-
-        if isinstance(responses, dict):
-            for stage, stage_responses in responses.items():
-                if isinstance(stage_responses, str):
-                    stage_responses = [stage_responses]
-                self._stage_queues[stage].extend(stage_responses)
-        else:
-            if isinstance(responses, str):
-                responses = [responses]
-            self._global_queue.extend(responses)
-
-    def generate(self, prompt: str, image_path: str | None = None, stage: str = "generic") -> str:
-        if self._callable is not None:
-            return str(self._callable(prompt, image_path, stage))
-        if self._stage_queues[stage]:
-            return self._stage_queues[stage].popleft()
-        if self._global_queue:
-            return self._global_queue.popleft()
-        raise RuntimeError(f"No stub VLM response available for stage '{stage}'")
-
-
 class TransformersVLMClient(BaseVLMClient):
-    """Transformers-backed multimodal VLM client with optional response caching."""
+    """Transformers-backed multimodal VLM client."""
 
     def __init__(
         self,
         model_name: str,
         device: str = "cuda",
-        dtype: str = "bfloat16",
+        dtype: str = "float16",
+        device_map: str | None = None,
+        attention_implementation: str | None = None,
+        quantization: str = "none",
         max_new_tokens: int = 512,
+        max_time_sec: float | None = None,
         temperature: float = 0.0,
         do_sample: bool = False,
         cache_dir: str | None = None,
@@ -99,53 +73,64 @@ class TransformersVLMClient(BaseVLMClient):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
+        self.device_map = device_map
+        self.attention_implementation = attention_implementation
+        self.quantization = quantization
         self.max_new_tokens = max_new_tokens
+        self.max_time_sec = max_time_sec
         self.temperature = temperature
         self.do_sample = do_sample
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self._processor = None
-        self._model = None
-        self._torch = None
-        self._pil_image = None
-        self._model_device = None
+        self.torch_dtype = _TORCH_DTYPES[self.dtype]
+        configure_qwen3_5_runtime()
+        self.processor = AutoProcessor.from_pretrained(self.model_name, **self._processor_kwargs())
+        self.model = AutoModelForImageTextToText.from_pretrained(self.model_name, **self._model_kwargs())
+        if self.device_map is None:
+            self.model = self.model.to(self.device)
+        self.model.eval()
 
-    def _ensure_loaded(self):
-        if self._processor is not None and self._model is not None:
-            return
+        self.model_device = next(iter(self.model.parameters())).device
+        self.eos_token_id = self.processor.tokenizer.eos_token_id
+        self.pad_token_id = self.processor.tokenizer.pad_token_id or self.eos_token_id
 
-        import torch
-        from PIL import Image
-        from transformers import AutoProcessor
+    def _processor_kwargs(self) -> dict:
+        kwargs = {"trust_remote_code": True}
+        if self.cache_dir is not None:
+            kwargs["cache_dir"] = str(self.cache_dir)
+        return kwargs
 
-        try:
-            from transformers import AutoModelForImageTextToText as _AutoModel
-        except ImportError:
-            try:
-                from transformers import AutoModelForVision2Seq as _AutoModel
-            except ImportError:
-                from transformers import AutoModelForCausalLM as _AutoModel
+    def _quantization_config(self) -> BitsAndBytesConfig | None:
+        if self.quantization == "none":
+            return None
+        if self.quantization == "4bit":
+            return BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=self.torch_dtype,
+            )
+        return BitsAndBytesConfig(load_in_8bit=True)
 
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
+    def _model_kwargs(self) -> dict:
+        kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": self.torch_dtype,
         }
-        torch_dtype = dtype_map[self.dtype]
-
-        self._processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
-        self._model = _AutoModel.from_pretrained(
-            self.model_name,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        )
-        if hasattr(self._model, "to"):
-            self._model = self._model.to(self.device)
-        self._torch = torch
-        self._pil_image = Image
-        self._model_device = torch.device(self.device)
+        if self.cache_dir is not None:
+            kwargs["cache_dir"] = str(self.cache_dir)
+        if self.attention_implementation is not None:
+            kwargs["attn_implementation"] = self.attention_implementation
+        quantization_config = self._quantization_config()
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
+        if self.device_map is not None:
+            kwargs["device_map"] = self.device_map
+        elif self.quantization != "none":
+            kwargs["device_map"] = "auto"
+        return kwargs
 
     def _cache_key(self, prompt: str, image_path: str | None, stage: str) -> str:
         payload = {
@@ -159,20 +144,27 @@ class TransformersVLMClient(BaseVLMClient):
             digest.update(Path(image_path).read_bytes())
         return digest.hexdigest()
 
-    def _read_cache(self, cache_key: str) -> Optional[str]:
+    def _cached_response(self, cache_key: str) -> str | None:
         if self.cache_dir is None:
             return None
-        path = self.cache_dir / f"{cache_key}.json"
-        if not path.exists():
+        cache_path = self.cache_dir / f"{cache_key}.json"
+        if not cache_path.exists():
             return None
-        with open(path, "r", encoding="utf-8") as f:
+        with open(cache_path, "r", encoding="utf-8") as f:
             payload = json.load(f)
         return payload["response"]
 
-    def _write_cache(self, cache_key: str, prompt: str, response: str, stage: str, image_path: str | None) -> None:
+    def _save_cached_response(
+        self,
+        cache_key: str,
+        prompt: str,
+        response: str,
+        stage: str,
+        image_path: str | None,
+    ) -> None:
         if self.cache_dir is None:
             return
-        path = self.cache_dir / f"{cache_key}.json"
+        cache_path = self.cache_dir / f"{cache_key}.json"
         payload = {
             "model_name": self.model_name,
             "stage": stage,
@@ -180,92 +172,78 @@ class TransformersVLMClient(BaseVLMClient):
             "prompt": prompt,
             "response": response,
         }
-        with open(path, "w", encoding="utf-8") as f:
+        with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    def _prepare_inputs(self, prompt: str, image_path: str | None):
-        self._ensure_loaded()
-        assert self._processor is not None
-        assert self._pil_image is not None
-
-        image = None
-        if image_path is not None:
-            image = self._pil_image.open(image_path).convert("RGB")
-
+    def _build_messages(self, prompt: str, image_path: str | None) -> list[dict]:
         content = []
-        if image is not None:
-            content.append({"type": "image", "image": image})
+        if image_path is not None:
+            content.append({"type": "image", "image": Image.open(image_path).convert("RGB")})
         content.append({"type": "text", "text": prompt})
-        messages = [{"role": "user", "content": content}]
+        return [{"role": "user", "content": content}]
 
-        if hasattr(self._processor, "apply_chat_template"):
-            try:
-                text = self._processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                )
-            except TypeError:
-                text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    def _prepare_inputs(self, prompt: str, image_path: str | None) -> dict:
+        messages = self._build_messages(prompt, image_path)
+        batch = self.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        return dict(batch.to(self.model_device).items())
 
-            if image is not None:
-                inputs = self._processor(images=image, text=text, return_tensors="pt")
-            else:
-                inputs = self._processor(text=text, return_tensors="pt")
-        else:
-            if image is not None:
-                inputs = self._processor(images=image, text=prompt, return_tensors="pt")
-            else:
-                inputs = self._processor(text=prompt, return_tensors="pt")
-        return inputs
+    def _generation_kwargs(self) -> dict:
+        kwargs = {
+            "do_sample": self.do_sample,
+            "max_new_tokens": self.max_new_tokens,
+            "pad_token_id": self.pad_token_id,
+        }
+        if self.eos_token_id is not None:
+            kwargs["eos_token_id"] = self.eos_token_id
+        if self.max_time_sec is not None:
+            kwargs["max_time"] = self.max_time_sec
+        if self.do_sample:
+            kwargs["temperature"] = self.temperature
+        return kwargs
 
     def generate(self, prompt: str, image_path: str | None = None, stage: str = "generic") -> str:
         cache_key = self._cache_key(prompt, image_path, stage)
-        cached = self._read_cache(cache_key)
+        cached = self._cached_response(cache_key)
         if cached is not None:
             return cached
 
-        self._ensure_loaded()
-        assert self._torch is not None
-        assert self._model is not None
+        model_inputs = self._prepare_inputs(prompt, image_path)
+        generation_kwargs = self._generation_kwargs()
+        with torch.inference_mode():
+            output_ids = self.model.generate(**model_inputs, **generation_kwargs)
 
-        inputs = self._prepare_inputs(prompt, image_path)
-        inputs = {k: v.to(self._model_device) if hasattr(v, "to") else v for k, v in inputs.items()}
-
-        generation_kwargs = {
-            "max_new_tokens": self.max_new_tokens,
-            "do_sample": self.do_sample,
-        }
-        if self.do_sample:
-            generation_kwargs["temperature"] = self.temperature
-
-        with self._torch.no_grad():
-            outputs = self._model.generate(**inputs, **generation_kwargs)
-
-        prompt_tokens = inputs.get("input_ids")
-        if prompt_tokens is not None:
-            generated = outputs[:, prompt_tokens.shape[-1] :]
-        else:
-            generated = outputs
-        response = self._processor.batch_decode(generated, skip_special_tokens=True)[0]
+        prompt_ids = model_inputs.get("input_ids")
+        generated_ids = output_ids
+        if prompt_ids is not None:
+            generated_ids = [row[len(prefix) :] for prefix, row in zip(prompt_ids, output_ids)]
+        response = self.processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
         response = strip_thinking_tokens(response)
-        self._write_cache(cache_key, prompt, response, stage, image_path)
+        self._save_cached_response(cache_key, prompt, response, stage, image_path)
         return response
 
 
 def create_vlm_client(config: TAMPConfiguration) -> BaseVLMClient:
     """Create a VLM client from the TAMP configuration."""
-    if config.vlm_backend == "stub":
-        return StubVLMClient()
-    if config.vlm_backend == "transformers":
-        return TransformersVLMClient(
-            model_name=config.vlm_model_name,
-            device=config.vlm_device,
-            dtype=config.vlm_dtype,
-            max_new_tokens=config.vlm_max_new_tokens,
-            temperature=config.vlm_temperature,
-            do_sample=config.vlm_do_sample,
-            cache_dir=config.vlm_cache_dir,
-        )
-    raise ValueError(f"Unsupported VLM backend: {config.vlm_backend}")
+    return TransformersVLMClient(
+        model_name=config.vlm_model_name,
+        device=config.vlm_device,
+        dtype=config.vlm_dtype,
+        device_map=config.vlm_device_map,
+        attention_implementation=config.vlm_attention_implementation,
+        quantization=config.vlm_quantization,
+        max_new_tokens=config.vlm_max_new_tokens,
+        max_time_sec=config.vlm_max_time_sec,
+        temperature=config.vlm_temperature,
+        do_sample=config.vlm_do_sample,
+        cache_dir=config.vlm_cache_dir,
+    )

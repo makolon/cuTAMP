@@ -7,7 +7,6 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import logging
 from pathlib import Path
 
 import torch
@@ -23,8 +22,6 @@ from curobo.types.robot import RobotConfig
 from curobo.util_file import get_robot_configs_path, join_path, load_yaml, get_assets_path
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
 from cutamp.robots.utils import RerunRobot
-
-_log = logging.getLogger(__name__)
 
 franka_neutral_joint_positions = (-0.0, -0.785398, 0.0, -2.356194, 0.0, 1.570796, 0.785398, 0.04)
 

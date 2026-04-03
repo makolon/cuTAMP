@@ -8,6 +8,7 @@
 # its affiliates is strictly prohibited.
 
 import os
+import argparse
 from typing import Optional
 
 from cutamp.algorithm import run_cutamp
@@ -67,8 +68,6 @@ def cutamp_demo(
 
 
 def entrypoint():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Run cuTAMP demo. We do not expose all the configs so check cutamp/config.py for additional configs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

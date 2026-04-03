@@ -7,11 +7,10 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from .vlm_client import BaseVLMClient, StubVLMClient, TransformersVLMClient, create_vlm_client, strip_thinking_tokens
+from .vlm_client import BaseVLMClient, TransformersVLMClient, create_vlm_client, strip_thinking_tokens
 
 __all__ = [
     "BaseVLMClient",
-    "StubVLMClient",
     "TransformersVLMClient",
     "create_vlm_client",
     "strip_thinking_tokens",

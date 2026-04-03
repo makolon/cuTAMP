@@ -1,11 +1,12 @@
 import tempfile
 import unittest
+from collections import defaultdict, deque
 from pathlib import Path
 
 import torch
 
 from cutamp.algorithm import CutampRunResult
-from cutamp.clients.vlm_client import StubVLMClient
+from cutamp.clients.vlm_client import BaseVLMClient
 from cutamp.config import TAMPConfiguration
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
@@ -25,7 +26,6 @@ def _make_config(experiment_root: str) -> TAMPConfiguration:
     return TAMPConfiguration(
         enable_vlm_tamp=True,
         open_goal="put both books on the shelf",
-        vlm_backend="stub",
         experiment_root=experiment_root,
         enable_visualizer=False,
         save_retrieval_artifacts=False,
@@ -36,6 +36,18 @@ def _support_pose(surface, obj, buffer: float = 0.01):
     surface_top = surface.pose[2] + surface.dims[2] / 2
     obj_height = obj.dims[2]
     return [surface.pose[0], surface.pose[1], surface_top + obj_height / 2 + buffer, *obj.pose[3:]]
+
+
+class _ScriptedVLMClient(BaseVLMClient):
+    def __init__(self, responses: dict[str, list[str]]):
+        self._stage_queues = defaultdict(deque)
+        for stage, stage_responses in responses.items():
+            self._stage_queues[stage].extend(stage_responses)
+
+    def generate(self, prompt: str, image_path: str | None = None, stage: str = "generic") -> str:
+        if self._stage_queues[stage]:
+            return self._stage_queues[stage].popleft()
+        raise RuntimeError(f"No scripted VLM response available for stage '{stage}'")
 
 
 class _AlwaysSuccessPlanner:
@@ -115,7 +127,7 @@ class VLMTAMPTests(unittest.TestCase):
     def test_run_vlm_tamp_reprompts_after_invalid_subgoal_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
-            client = StubVLMClient(
+            client = _ScriptedVLMClient(
                 {
                     "stage1": [
                         "Move the blue book to the shelf",
@@ -143,7 +155,7 @@ class VLMTAMPTests(unittest.TestCase):
     def test_run_vlm_tamp_promotes_blocker_objects(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_config(tmpdir)
-            client = StubVLMClient(
+            client = _ScriptedVLMClient(
                 {
                     "stage1": ["Put the green book on the shelf"],
                     "stage2": ["On(book_green, shelf)"],
@@ -161,6 +173,29 @@ class VLMTAMPTests(unittest.TestCase):
             self.assertTrue(result.found_solution)
             modes = [attempt["mode"] for attempt in result.attempt_trace if "mode" in attempt]
             self.assertEqual(modes[:2], ["reduced", "reduced_with_blockers"])
+
+    def test_run_vlm_tamp_keeps_full_environment_across_reduced_subgoals(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_config(tmpdir)
+            client = _ScriptedVLMClient(
+                {
+                    "stage1": ["Put the blue and green books on the shelf"],
+                    "stage2": ["On(book_blue, shelf)\nOn(book_green, shelf)"],
+                }
+            )
+            result = run_vlm_tamp(
+                self.env,
+                config,
+                self.cost_reducer,
+                self.constraint_checker,
+                experiment_id="multi_subgoal_case",
+                vlm_client=client,
+                planner_fn=_AlwaysSuccessPlanner(),
+            )
+            self.assertTrue(result.found_solution)
+            self.assertEqual(result.subgoals_validated, ["On(book_blue, shelf)", "On(book_green, shelf)"])
+            self.assertIsNotNone(result.final_env)
+            self.assertEqual({obj.name for obj in result.final_env.movables}, {"book_blue", "book_green"})
 
 
 if __name__ == "__main__":

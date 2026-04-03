@@ -9,7 +9,7 @@
 
 import os
 import warnings
-from typing import Dict, List, ClassVar, Iterable, Set, Tuple
+from typing import Dict, List, ClassVar, Iterable, Sequence, Set, Tuple
 
 import torch
 import yaml
@@ -179,6 +179,23 @@ def set_object_pose(env: TAMPEnvironment, obj_name: str, pose: List[float]) -> N
             obj.pose = list(pose)
             return
     raise ValueError(f"Object {obj_name} not found in environment {env.name}")
+
+
+def merge_tamp_environment_state(reference_env: TAMPEnvironment, state_env: TAMPEnvironment) -> TAMPEnvironment:
+    """Clone the reference environment and overwrite object poses from another environment."""
+    merged = clone_tamp_environment(reference_env)
+    for obj in state_env.movables + state_env.statics:
+        set_object_pose(merged, obj.name, obj.pose)
+    return merged
+
+
+def overlay_tamp_environment_states(template_env: TAMPEnvironment, state_envs: Sequence[TAMPEnvironment]) -> TAMPEnvironment:
+    """Clone a template environment and sequentially apply poses from multiple state environments."""
+    merged = clone_tamp_environment(template_env)
+    for state_env in state_envs:
+        for obj in state_env.movables + state_env.statics:
+            set_object_pose(merged, obj.name, obj.pose)
+    return merged
 
 
 def reduce_tamp_environment(

@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
@@ -20,8 +22,6 @@ from cutamp.vlm_tamp import run_vlm_tamp
 
 
 def entrypoint():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Run the VLM-guided cuTAMP pipeline on the book_shelf task.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -64,19 +64,37 @@ def entrypoint():
     )
 
     parser.add_argument("--vlm_model_name", type=str, default=TAMPConfiguration.vlm_model_name, help="HF model id.")
-    parser.add_argument(
-        "--vlm_backend",
-        choices=["transformers", "stub"],
-        default=TAMPConfiguration.vlm_backend,
-        help="VLM inference backend.",
-    )
     parser.add_argument("--vlm_device", type=str, default=TAMPConfiguration.vlm_device, help="VLM device.")
     parser.add_argument("--vlm_dtype", type=str, default=TAMPConfiguration.vlm_dtype, help="VLM dtype.")
+    parser.add_argument(
+        "--vlm_device_map",
+        type=str,
+        default=TAMPConfiguration.vlm_device_map,
+        help="Optional Transformers device_map for the VLM model.",
+    )
+    parser.add_argument(
+        "--vlm_attention_implementation",
+        type=str,
+        default=TAMPConfiguration.vlm_attention_implementation,
+        help="Optional attention implementation string forwarded to Transformers.",
+    )
+    parser.add_argument(
+        "--vlm_quantization",
+        choices=["none", "4bit", "8bit"],
+        default=TAMPConfiguration.vlm_quantization,
+        help="Optional quantization mode for loading the VLM.",
+    )
     parser.add_argument(
         "--vlm_max_new_tokens",
         type=int,
         default=TAMPConfiguration.vlm_max_new_tokens,
         help="Maximum generated tokens per VLM call.",
+    )
+    parser.add_argument(
+        "--vlm_max_time_sec",
+        type=float,
+        default=TAMPConfiguration.vlm_max_time_sec,
+        help="Optional max_time value forwarded to model.generate.",
     )
     parser.add_argument(
         "--vlm_temperature",
@@ -131,10 +149,13 @@ def entrypoint():
         enable_vlm_tamp=True,
         open_goal=args.open_goal,
         vlm_model_name=args.vlm_model_name,
-        vlm_backend=args.vlm_backend,
         vlm_device=args.vlm_device,
         vlm_dtype=args.vlm_dtype,
+        vlm_device_map=args.vlm_device_map,
+        vlm_attention_implementation=args.vlm_attention_implementation,
+        vlm_quantization=args.vlm_quantization,
         vlm_max_new_tokens=args.vlm_max_new_tokens,
+        vlm_max_time_sec=args.vlm_max_time_sec,
         vlm_temperature=args.vlm_temperature,
         vlm_do_sample=args.vlm_do_sample,
         vlm_max_reprompts=args.vlm_max_reprompts,

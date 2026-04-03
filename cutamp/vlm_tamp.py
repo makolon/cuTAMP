@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -29,12 +28,10 @@ from cutamp.config import TAMPConfiguration
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment
-from cutamp.envs.utils import clone_tamp_environment, get_env_dict, reduce_tamp_environment
+from cutamp.envs.utils import clone_tamp_environment, get_env_dict, overlay_tamp_environment_states, reduce_tamp_environment
 from cutamp.task_planning import Atom
 from cutamp.tamp_domain import HandEmpty, On
 from cutamp.utils.common import approximate_goal_aabb
-
-_log = logging.getLogger(__name__)
 
 _LINE_PREFIX_PATTERN = re.compile(r"^\s*(?:[-*]\s*|\d+[.)]\s*)")
 _FORMAL_SUBGOAL_PATTERN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\((.*?)\))?\s*$")
@@ -106,6 +103,16 @@ def _save_env_yaml(path: Path, env: TAMPEnvironment) -> None:
         yaml.safe_dump(get_env_dict(env), f, sort_keys=False)
 
 
+def _build_env_manifest(env: TAMPEnvironment) -> dict[str, Any]:
+    return {
+        "name": env.name,
+        "movables": [obj.name for obj in env.movables],
+        "statics": [obj.name for obj in env.statics],
+        "types": {obj_type: [obj.name for obj in objects] for obj_type, objects in env.type_to_objects.items()},
+        "goal_state": [_subgoal_to_string(atom) for atom in env.goal_state],
+    }
+
+
 def _object_name_maps(env: TAMPEnvironment) -> tuple[dict[str, str], dict[str, str]]:
     object_map = {_normalize_name(obj.name): obj.name for obj in env.movables + env.statics}
     surface_map = {_normalize_name(obj.name): obj.name for obj in env.type_to_objects.get("Surface", [])}
@@ -119,7 +126,9 @@ def _support_relation(
     xy_tol: float = 0.01,
     z_tol: float = 0.02,
 ) -> Optional[str]:
-    obj = next(obj for obj in env.movables if obj.name == obj_name)
+    obj = next((obj for obj in env.movables + env.statics if obj.name == obj_name), None)
+    if obj is None:
+        return None
     obj_aabb = approximate_goal_aabb(obj)
     obj_center_xy = obj_aabb.mean(dim=0)[:2]
     obj_bottom_z = float(obj_aabb[0, 2].item())
@@ -553,9 +562,11 @@ def run_vlm_tamp(
     _write_text(vlm_dir / "open_goal.txt", config.open_goal)
     _write_json(vlm_dir / "config.json", config.__dict__)
     _save_env_yaml(vlm_dir / "initial_env.yml", env)
+    _write_json(vlm_dir / "initial_env_manifest.json", _build_env_manifest(env))
 
     client = vlm_client or create_vlm_client(config)
-    current_env = clone_tamp_environment(env)
+    template_env = clone_tamp_environment(env)
+    current_env = clone_tamp_environment(template_env)
     current_q_init: Optional[list[float]] = None
     hand_empty = True
     successful_atoms: list[Atom] = []
@@ -695,13 +706,18 @@ def run_vlm_tamp(
                 plan_failed = True
                 break
 
-            current_env = successful_result.final_env or current_env
+            if successful_result.final_env is not None:
+                current_env = overlay_tamp_environment_states(
+                    template_env,
+                    [current_env, successful_result.final_env],
+                )
             if successful_result.final_q_init is not None:
                 current_q_init = successful_result.final_q_init.detach().cpu().tolist()
             hand_empty = True
             successful_atoms.append(goal_atom)
             last_best_particle = successful_result.best_particle
             _save_env_yaml(vlm_dir / f"state_after_{len(successful_atoms):02d}.yml", current_env)
+            _write_json(vlm_dir / f"state_after_{len(successful_atoms):02d}_manifest.json", _build_env_manifest(current_env))
 
         if not plan_failed:
             final_q_init = current_q_init

@@ -131,13 +131,15 @@ class TAMPConfiguration:
     open_goal: Optional[str] = None
     # Hugging Face model identifier for the multimodal VLM.
     vlm_model_name: str = "Qwen/Qwen3.5-9B"
-    # Inference backend used to query the VLM.
-    vlm_backend: Literal["transformers", "stub"] = "transformers"
     # Device and dtype for VLM inference.
     vlm_device: str = "cuda"
-    vlm_dtype: str = "bfloat16"
+    vlm_dtype: str = "float16"
+    vlm_device_map: Optional[str] = None
+    vlm_attention_implementation: Optional[str] = None
+    vlm_quantization: Literal["none", "4bit", "8bit"] = "none"
     # Text generation parameters for the VLM.
     vlm_max_new_tokens: int = 512
+    vlm_max_time_sec: Optional[float] = None
     vlm_temperature: float = 0.0
     vlm_do_sample: bool = False
     # Number of reprompt rounds after the initial VLM response.
@@ -225,12 +227,14 @@ def validate_tamp_config(config: TAMPConfiguration):
     if config.enable_vlm_tamp:
         if config.open_goal is None or not config.open_goal.strip():
             raise ValueError("open_goal must be provided when VLM-TAMP is enabled")
-        if config.vlm_backend not in {"transformers", "stub"}:
-            raise ValueError(f"Unsupported vlm_backend: {config.vlm_backend}")
         if config.vlm_dtype not in {"float16", "bfloat16", "float32"}:
             raise ValueError(f"Unsupported vlm_dtype: {config.vlm_dtype}")
+        if config.vlm_quantization not in {"none", "4bit", "8bit"}:
+            raise ValueError(f"Unsupported vlm_quantization: {config.vlm_quantization}")
         if config.vlm_max_new_tokens <= 0:
             raise ValueError(f"vlm_max_new_tokens must be positive, not {config.vlm_max_new_tokens}")
+        if config.vlm_max_time_sec is not None and config.vlm_max_time_sec <= 0:
+            raise ValueError(f"vlm_max_time_sec must be positive or None, not {config.vlm_max_time_sec}")
         if config.vlm_temperature < 0:
             raise ValueError(f"vlm_temperature must be non-negative, not {config.vlm_temperature}")
         if config.vlm_max_reprompts < 0:
