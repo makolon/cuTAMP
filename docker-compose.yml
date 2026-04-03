@@ -1,0 +1,111 @@
+version: "3.9"
+
+x-default-cutamp-volumes: &default-cutamp-volumes
+  - type: bind
+    source: /tmp/.X11-unix
+    target: /tmp/.X11-unix
+  - type: bind
+    source: /etc/localtime
+    target: /etc/localtime
+    read_only: true
+  # Xauthority
+  - type: bind
+    source: ${XAUTHORITY:-$HOME/.Xauthority}
+    target: /root/.Xauthority
+    read_only: true
+  - type: bind
+    source: ./
+    target: /workspace
+  # nvoptix is optional-ish on some hosts; keep if it exists in your environment
+  - type: bind
+    source: /usr/share/nvidia/nvoptix.bin
+    target: /usr/share/nvidia/nvoptix.bin
+    read_only: true
+  - type: bind
+    source: ./nvidia_icd_glx.json
+    target: /etc/vulkan/icd.d/nvidia_icd_glx.json
+    read_only: true
+
+x-default-cutamp-environment: &default-cutamp-environment
+  OMNI_KIT_ALLOW_ROOT: "1"
+  TERM: ${TERM}
+  DISPLAY: ${DISPLAY:-:20}
+  QT_X11_NO_MITSHM: "1"
+  XAUTHORITY: /root/.Xauthority
+  XDG_RUNTIME_DIR: /tmp/runtime-root
+  # NVIDIA container runtime
+  NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics,display,video
+  NVIDIA_VISIBLE_DEVICES: all
+  __GLX_VENDOR_LIBRARY_NAME: nvidia
+  # cuTAMP
+  CUTAMP_PATH: ${CUTAMP_PATH:-/workspace}
+  # Recommended (optional)
+  VK_ICD_FILENAMES: /etc/vulkan/icd.d/nvidia_icd_glx.json
+  TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
+
+services:
+  # noVNC Desktop (X server provider)
+  desktop:
+    image: ghcr.io/matsuolab/virtual_desktop:latest
+    container_name: cutamp_desktop
+    # modern compose: prefer "gpus" over runtime=nvidia
+    gpus:
+      - count: all
+        capabilities: [gpu]
+    environment:
+      <<: *default-cutamp-environment
+    ports:
+      - "${WEB_PORT:-6080}:6080"
+    volumes:
+      - "/tmp/.X11-unix:/tmp/.X11-unix:rw"
+    security_opt:
+      - seccomp:unconfined
+    shm_size: "2gb"
+    ipc: host
+
+  cutamp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CUTAMP_PATH_ARG: ${CUTAMP_PATH:-/workspace}
+    image: cutamp:latest
+    container_name: cutamp
+    gpus:
+      - count: all
+        capabilities: [gpu]
+    depends_on:
+      - desktop
+    shm_size: "16gb"
+    ipc: host
+    environment:
+      <<: *default-cutamp-environment
+      # Force headless EGL to avoid GLX requirements in the container
+      KIT_USE_EGL: "1"
+    volumes: *default-cutamp-volumes
+    working_dir: /workspace
+    network_mode: host
+    entrypoint: ["bash"]
+    stdin_open: true
+    tty: true
+
+  # Optional: dedicated headless service (no X, no swapchain)
+  cutamp_headless:
+    image: cutamp:latest
+    container_name: cutamp_headless
+    gpus:
+      - count: all
+        capabilities: [gpu]
+    environment:
+      <<: *default-cutamp-environment
+      DISPLAY: ""  # no X
+      KIT_USE_EGL: "1"
+    shm_size: "16gb"
+    ipc: host
+    volumes: *default-cutamp-volumes
+    working_dir: /workspace
+    network_mode: host
+    entrypoint: ["bash"]
+    stdin_open: true
+    tty: true
+    profiles: ["headless"]

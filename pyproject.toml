@@ -29,6 +29,11 @@ dependencies = [
     "tqdm",
     "trimesh",
     "yourdfpy",
+    "torch==2.7.0",
+    "torchaudio==2.7.0",
+    "torchvision==0.22.0",
+    # Third-party integrations
+    "curobo",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +50,24 @@ cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
 
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }
+
+[tool.uv.sources]
+torchaudio = { index = "torch" }
+torch = { index = "torch" }
+torchvision = { index = "torch" }
+
+# Git sources
+curobo = { git = "https://github.com/NVlabs/curobo.git" }
+
+[[tool.uv.index]]
+explicit = true
+name = "torch"
+url = "https://download.pytorch.org/whl/cu128"
+
+[[tool.uv.index]]
+explicit = false
+name = "pypi"
+url = "https://pypi.org/simple"
+
+[tool.uv.extra-build-dependencies]
+curobo = ["torch"]
