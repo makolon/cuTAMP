@@ -188,6 +188,12 @@ class ParticleOptimizer:
                 visualizer.log_scalar("loss", loss.item())
                 timer.stop("visualize_opt_rollout")
 
+            if num_satisfying > 0 and self.config.break_on_satisfying and not self.config.optimize_soft_costs:
+                opt_metrics["opt_break_step"] = step
+                timer.stop("optimization_step")
+                _log.info(f"Breaking optimization early at step {step} after finding satisfying particles")
+                break
+
             # Compute gradients and step the optimizer
             loss.backward()
             optimizer.step()

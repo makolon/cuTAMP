@@ -13,6 +13,9 @@ from typing import Literal, Optional
 
 @dataclass(frozen=True)
 class TAMPConfiguration:
+    # Random seed for reproducible sampling. If None, sampling is left unseeded.
+    seed: Optional[int] = None
+
     # Number of particles to initialize and optimize over
     num_particles: int = 1024
 
@@ -97,8 +100,24 @@ class TAMPConfiguration:
     # Root directory for logging experiments
     experiment_root: str = "logs/cutamp-experiments"
 
+    ## Retrieval warm start
+    # Whether to load warm-start particles from prior successful runs.
+    enable_retrieval: bool = False
+    # Root directory containing experiment logs to search for retrieval artifacts. If None, use experiment_root.
+    retrieval_root: Optional[str] = None
+    # Number of particles to populate from retrieval before filling the rest from standard initialization.
+    retrieval_num_particles: int = 1024
+    # Gaussian noise scale applied to retrieved particles. Defaults to 0 for exact replay.
+    retrieval_noise_scale: float = 0.0
+    # Pose-distance threshold below which a retrieved task is treated as an exact environment match.
+    retrieval_exact_env_tol: float = 1e-3
+    # Whether to save warm-start artifacts for future retrieval.
+    save_retrieval_artifacts: bool = True
+
 
 def validate_tamp_config(config: TAMPConfiguration):
+    if config.seed is not None and config.seed < 0:
+        raise ValueError(f"seed must be non-negative or None, not {config.seed}")
     if config.num_particles <= 0:
         raise ValueError(f"num_particles must be positive, not {config.num_particles}")
     if config.robot not in {"panda", "ur5"}:
@@ -129,6 +148,18 @@ def validate_tamp_config(config: TAMPConfiguration):
         raise ValueError(f"num_initial_plans must be positive, not {config.num_initial_plans}")
     if config.cache_subgraphs and config.approach == "sampling":
         raise ValueError("cache_subgraphs is not compatible with sampling approach")
+    if config.enable_retrieval and config.retrieval_num_particles <= 0:
+        raise ValueError(
+            f"retrieval_num_particles must be positive when retrieval is enabled, not {config.retrieval_num_particles}"
+        )
+    if config.enable_retrieval and config.retrieval_noise_scale < 0:
+        raise ValueError(
+            f"retrieval_noise_scale must be non-negative when retrieval is enabled, not {config.retrieval_noise_scale}"
+        )
+    if config.enable_retrieval and config.retrieval_exact_env_tol < 0:
+        raise ValueError(
+            f"retrieval_exact_env_tol must be non-negative when retrieval is enabled, not {config.retrieval_exact_env_tol}"
+        )
 
     # Collision checking
     if config.coll_n_spheres <= 0:

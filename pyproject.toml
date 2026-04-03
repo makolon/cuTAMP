@@ -52,6 +52,8 @@ exclude = ["cutamp/robots/assets"]
 
 [project.scripts]
 cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
+cutamp-collect-retrieval = "cutamp.scripts.collect_retrieval_data:entrypoint"
+cutamp-benchmark-retrieval = "cutamp.scripts.benchmark_retrieval:entrypoint"
 
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }

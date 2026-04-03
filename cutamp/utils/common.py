@@ -79,6 +79,13 @@ def action_6dof_to_mat4x4(action_6dof: Float[torch.Tensor, "*b 6"]) -> Float[tor
     return mat4x4
 
 
+def mat4x4_to_action_4dof(mat4x4: Float[torch.Tensor, "*b 4 4"]) -> Float[torch.Tensor, "*b 4"]:
+    """Convert a planar 4x4 pose into a 4-DOF action (xyz + yaw)."""
+    translation = mat4x4[..., :3, 3]
+    yaw = torch.atan2(mat4x4[..., 1, 0], mat4x4[..., 0, 0]).unsqueeze(-1)
+    return torch.cat([translation, yaw], dim=-1)
+
+
 def transform_spheres(
     spheres: Float[torch.Tensor, "num_spheres 4"], transform: Float[torch.Tensor, "*b 4 4"]
 ) -> Float[torch.Tensor, "*b num_spheres 4"]:

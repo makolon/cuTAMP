@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 import omegaconf
+import torch
 import yaml
 
 from cutamp.config import TAMPConfiguration
@@ -64,3 +65,13 @@ class ExperimentLogger:
             yaml.dump(env_dict, f, sort_keys=False)
         _log.info(f"Saved environment to {env_path}")
         return env_path
+
+    def log_torch(self, name: str, data: dict) -> Path:
+        """Save a dictionary of tensors for later warm-start retrieval."""
+        path = self.exp_dir / f"{name}.pt"
+        if path.exists():
+            raise ValueError(f"File {path} already exists")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(data, path)
+        _log.info(f"Logged tensor payload {name} to {path}")
+        return path

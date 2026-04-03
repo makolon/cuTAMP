@@ -25,13 +25,14 @@ from cutamp.scripts.utils import (
     default_constraint_to_tol,
     setup_logging,
     get_tetris_tuned_constraint_to_mult,
+    set_random_seed,
 )
 
 
-def load_demo_env(name: str) -> TAMPEnvironment:
+def load_demo_env(name: str, tetris_random_yaws: bool = False) -> TAMPEnvironment:
     if name.startswith("tetris_"):
         num_blocks = int(name.split("tetris_")[-1])
-        env = load_tetris_env(num_blocks, buffer_multiplier=1.0)
+        env = load_tetris_env(num_blocks, buffer_multiplier=1.0, random_yaws=tetris_random_yaws)
     elif name == "book_shelf":
         env = load_book_shelf_env()
     elif name == "stick_button":
@@ -54,6 +55,7 @@ def cutamp_demo(
     use_tetris_tuned_weights: bool = False,
 ):
     setup_logging()
+    set_random_seed(config.seed)
 
     constraint_to_mult = (
         get_tetris_tuned_constraint_to_mult() if use_tetris_tuned_weights else default_constraint_to_mult.copy()
@@ -81,6 +83,7 @@ def entrypoint():
     parser.add_argument(
         "-n", "--num_particles", type=int, default=1024, help="Number of particles to use (i.e. batch size)"
     )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible sampling.")
 
     # Soft costs
     parser.add_argument(
@@ -100,6 +103,11 @@ def entrypoint():
         default=4,
         choices=[4, 6],
         help="Grasp DOF to use. 6-DOF is really only supported for the book_shelf environment.",
+    )
+    parser.add_argument(
+        "--tetris_random_yaws",
+        action="store_true",
+        help="Randomize initial yaw of Tetris blocks. Useful for retrieval data collection and benchmarking.",
     )
 
     # Approach
@@ -161,6 +169,35 @@ def entrypoint():
         default=None,
         help="Experiment ID for logging. Results will be saved in <experiment_root>/<experiment_id>",
     )
+    parser.add_argument(
+        "--enable_retrieval",
+        action="store_true",
+        help="Warm start particle initialization from prior successful runs in the retrieval root.",
+    )
+    parser.add_argument(
+        "--retrieval_root",
+        type=str,
+        default=None,
+        help="Root directory to search for retrieval artifacts. Defaults to --experiment_root when omitted.",
+    )
+    parser.add_argument(
+        "--retrieval_num_particles",
+        type=int,
+        default=None,
+        help="Number of particles to populate from retrieval before filling the rest with standard initialization.",
+    )
+    parser.add_argument(
+        "--retrieval_noise_scale",
+        type=float,
+        default=0.0,
+        help="Gaussian noise scale applied to retrieved particles.",
+    )
+    parser.add_argument(
+        "--retrieval_exact_env_tol",
+        type=float,
+        default=1e-3,
+        help="Environment pose-distance threshold used to treat a retrieved task as an exact match.",
+    )
 
     # Tetris tuned weights
     parser.add_argument(
@@ -170,6 +207,7 @@ def entrypoint():
     # We only expose a subset of the full TAMPConfiguration. Check config.py for the full configuration.
     args = parser.parse_args()
     config = TAMPConfiguration(
+        seed=args.seed,
         num_particles=args.num_particles,
         robot=args.robot,
         grasp_dof=args.grasp_dof,
@@ -186,11 +224,16 @@ def entrypoint():
         opt_viz_interval=args.viz_interval,
         viz_robot_mesh=not args.disable_robot_mesh,
         experiment_root=args.experiment_root,
+        enable_retrieval=args.enable_retrieval,
+        retrieval_root=args.retrieval_root,
+        retrieval_num_particles=args.retrieval_num_particles or args.num_particles,
+        retrieval_noise_scale=args.retrieval_noise_scale,
+        retrieval_exact_env_tol=args.retrieval_exact_env_tol,
     )
     validate_tamp_config(config)
 
     # Load env and run demo
-    env = load_demo_env(args.env)
+    env = load_demo_env(args.env, tetris_random_yaws=args.tetris_random_yaws)
     cutamp_demo(env, config, experiment_id=args.experiment_id, use_tetris_tuned_weights=args.tuned_tetris_weights)
 
 

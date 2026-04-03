@@ -26,6 +26,7 @@ from cutamp.experiment_logger import ExperimentLogger
 from cutamp.motion_solver import solve_curobo
 from cutamp.optimize_plan import ParticleOptimizer
 from cutamp.particle_initialization import ParticleInitializer
+from cutamp.retrieval import get_elite_particles, save_retrieval_artifact
 from cutamp.robots import get_q_home, load_robot_container
 from cutamp.rollout import RolloutFunction
 from cutamp.tamp_domain import all_tamp_operators
@@ -163,6 +164,7 @@ def sample_plan_skeleton(
         "num_satisfying": num_satisfying,
         "best_cost": best_cost,
         "best_soft_cost": best_soft_cost,
+        "retrieval": particle_initializer.latest_retrieval_info.copy(),
     }
 
     _log.debug(
@@ -338,7 +340,7 @@ def run_cutamp(
     # Sort plans by heuristic
     def sort_plans():
         with timer.time("sort_plans"):
-            plan_queue.sort(key=lambda x: x["heuristic"])
+            plan_queue.sort(key=lambda x: (0 if x.get("retrieval", {}).get("hit") else 1, x["heuristic"]))
 
     sort_plans()
     _log.info(f"Num plans: {len(plan_queue)}, num skipped: {num_skipped_plans}")
@@ -353,6 +355,7 @@ def run_cutamp(
     }
     curobo_plan = None
     found_solution = False
+    final_plan_info = None
     particle_optimizer = ParticleOptimizer(config, cost_reducer, constraint_checker)
     timer.start("first_solution")
     if found_solution_initially:
@@ -373,6 +376,7 @@ def run_cutamp(
 
         if config.approach == "optimization":
             has_satisfying, metrics, time_exceeded = particle_optimizer(plan_info, timer, visualizer)
+            metrics["retrieval"] = plan_info.get("retrieval", {})
             if metrics["best_cost"] is not None:
                 overall_metrics["best_cost"] = min(overall_metrics["best_cost"], metrics["best_cost"])
             if metrics["best_soft_cost"] is not None:
@@ -475,6 +479,7 @@ def run_cutamp(
                 "best_soft_cost": overall_metrics["best_soft_cost"],
                 "best_soft_costs": best_soft_costs,
                 "elapsed": elapsed,
+                "retrieval": plan_info.get("retrieval", {}),
             }
             exp_logger.log_dict(f"sampling/samp_{opt_iter:04d}", metrics)
             has_satisfying = total_num_satisfying > 0
@@ -495,6 +500,7 @@ def run_cutamp(
         overall_metrics["num_optimized_plans"] += 1
         if has_satisfying:
             found_solution = True
+            final_plan_info = plan_info
             if config.curobo_plan:
                 curobo_plan = solve_curobo(
                     plan_info,
@@ -506,6 +512,7 @@ def run_cutamp(
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
+            overall_metrics["retrieval"] = plan_info.get("retrieval", {})
             _log.debug(f"Total num satisfying {metrics['num_satisfying_final']}")
             if config.break_on_satisfying:
                 should_break = True
@@ -530,6 +537,12 @@ def run_cutamp(
     overall_metrics["found_solution"] = found_solution
     exp_logger.log_dict("overall_metrics", overall_metrics)
     exp_logger.log_dict("timer_metrics", timer.get_summaries())
+
+    # Save retrieval artifact for future warm starts
+    if found_solution and config.enable_experiment_logging and config.save_retrieval_artifacts and final_plan_info is not None:
+        elite_particles = get_elite_particles(final_plan_info, config, constraint_checker, cost_reducer)
+        if elite_particles is not None:
+            save_retrieval_artifact(exp_logger, world, config, final_plan_info["plan_skeleton"], elite_particles)
 
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)

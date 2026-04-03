@@ -23,6 +23,7 @@ from cutamp.samplers import (
     place_4dof_sampler,
     sample_yaw,
 )
+from cutamp.retrieval import RetrievalWarmStarter
 from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick
 from cutamp.tamp_world import TAMPWorld
 from cutamp.task_planning import PlanSkeleton
@@ -57,6 +58,43 @@ class ParticleInitializer:
         self.push_button_cache = {}
         self.push_stick_cache = {}
         self.failed_push = set()
+        self.retriever = RetrievalWarmStarter(world, config) if config.enable_retrieval else None
+        self.latest_retrieval_info = {
+            "hit": False,
+            "num_particles": 0,
+            "exact_env_match": False,
+            "source_experiment": None,
+            "score": None,
+        }
+
+    def _cache_success_count(self, cache_entry: dict, fallback: int) -> int:
+        if "success_count" in cache_entry:
+            return int(cache_entry["success_count"])
+        if "ik_result" in cache_entry:
+            return int(cache_entry["ik_result"].success.sum().item())
+        return fallback
+
+    def _cache_q(self, cache_entry: dict) -> torch.Tensor:
+        if "q" in cache_entry:
+            return cache_entry["q"].clone()
+        if "ik_result" in cache_entry:
+            return cache_entry["ik_result"].solution[:, 0].clone()
+        raise KeyError("Cache entry does not contain q or ik_result")
+
+    def _has_full_warmstart(self, warmstart_particles: Particles, *param_names: str) -> bool:
+        return all(
+            name in warmstart_particles and warmstart_particles[name].shape[0] >= self.config.num_particles
+            for name in param_names
+        )
+
+    def _merge_warmstart(self, param_name: str, current: torch.Tensor, warmstart_particles: Particles) -> torch.Tensor:
+        if param_name not in warmstart_particles:
+            return current
+
+        warm = warmstart_particles[param_name].to(device=current.device, dtype=current.dtype)
+        merged = current.clone()
+        merged[: warm.shape[0]] = warm[: merged.shape[0]]
+        return merged
 
     def __call__(self, plan_skeleton: PlanSkeleton, verbose: bool = True) -> Optional[Particles]:
         config = self.config
@@ -65,6 +103,28 @@ class ParticleInitializer:
         particles = {"q0": self.q_init.clone()}
         deferred_params = set()
         log_debug = _log.debug if verbose else lambda *args, **kwargs: None
+        warmstart_particles = self.retriever.get_warmstart(plan_skeleton) if self.retriever is not None else {}
+        if self.retriever is not None and self.retriever.last_match is not None:
+            self.latest_retrieval_info = {
+                "hit": True,
+                "num_particles": self.retriever.last_match.num_particles,
+                "exact_env_match": self.retriever.last_match.exact_env_match,
+                "source_experiment": self.retriever.last_match.source_experiment,
+                "score": self.retriever.last_match.score,
+                "source_artifact": self.retriever.last_match.source_artifact,
+            }
+            log_debug(
+                f"Warm-start hit from {self.retriever.last_match.source_experiment} "
+                f"(score={self.retriever.last_match.score:.4f}, exact={self.retriever.last_match.exact_env_match})"
+            )
+        else:
+            self.latest_retrieval_info = {
+                "hit": False,
+                "num_particles": 0,
+                "exact_env_match": False,
+                "source_experiment": None,
+                "score": None,
+            }
 
         # Note: we don't consider state after executing earlier samples
         # Iterate through each ground operator in the plan skeleton and initialize and build up particles
@@ -103,15 +163,28 @@ class ParticleInitializer:
                 if q in particles:
                     raise ValueError(f"{q=} shouldn't already be bound")
 
+                if self.latest_retrieval_info["exact_env_match"] and self._has_full_warmstart(warmstart_particles, grasp, q):
+                    particles[grasp] = warmstart_particles[grasp][:num_particles].clone()
+                    particles[q] = warmstart_particles[q][:num_particles].clone()
+                    deferred_params.remove(q)
+                    log_debug(f"{header}. Using full warm-start for pick on {obj}")
+                    if config.cache_subgraphs:
+                        self.pick_cache[obj] = {
+                            "sampled_grasps": particles[grasp].clone(),
+                            "q": particles[q].clone(),
+                            "success_count": num_particles,
+                        }
+                    continue
+
                 # Note: pick cache currently assumes object is at same pose as when sampled
                 if obj in self.pick_cache:
                     # important, we need to clone here
                     particles[grasp] = self.pick_cache[obj]["sampled_grasps"].clone()
-                    ik_result = self.pick_cache[obj]["ik_result"]
-                    particles[q] = ik_result.solution[:, 0].clone()
+                    particles[q] = self._cache_q(self.pick_cache[obj])
                     deferred_params.remove(q)
+                    success_count = self._cache_success_count(self.pick_cache[obj], num_particles)
                     log_debug(
-                        f"{header}. Using cached grasp poses for {obj}. {ik_result.success.sum()}/{num_particles} success"
+                        f"{header}. Using cached grasp poses for {obj}. {success_count}/{num_particles} success"
                     )
                     continue
 
@@ -138,6 +211,8 @@ class ParticleInitializer:
                 if config.random_init:
                     q_sample = sample_between_bounds(num_particles, world.robot_container.joint_limits)
                     particles[q] = q_sample
+                    success_count = num_particles
+                    ik_result = None
                 else:
                     obj_from_grasp = obj_from_grasp[good_idxs]
                     world_from_obj = pose_list_to_mat4x4(obj_curobo.pose).to(world.tensor_args.device)
@@ -151,11 +226,19 @@ class ParticleInitializer:
                         f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
                     )
                     particles[q] = ik_result.solution[:, 0]
+                    success_count = int(ik_result.success.sum().item())
                 deferred_params.remove(q)
+                particles[grasp] = self._merge_warmstart(grasp, particles[grasp], warmstart_particles)
+                particles[q] = self._merge_warmstart(q, particles[q], warmstart_particles)
 
                 # Store in cache
                 if config.cache_subgraphs:
-                    self.pick_cache[obj] = {"sampled_grasps": particles[grasp], "ik_result": ik_result}
+                    self.pick_cache[obj] = {
+                        "sampled_grasps": particles[grasp].clone(),
+                        "q": particles[q].clone(),
+                        "success_count": success_count,
+                        "ik_result": ik_result,
+                    }
 
             # Place
             elif op_name == Place.name:
@@ -171,6 +254,22 @@ class ParticleInitializer:
                 if q in particles:
                     raise ValueError(f"{q=} shouldn't already be bound")
 
+                if self.latest_retrieval_info["exact_env_match"] and self._has_full_warmstart(
+                    warmstart_particles, placement, q
+                ):
+                    particles[placement] = warmstart_particles[placement][:num_particles].clone()
+                    particles[q] = warmstart_particles[q][:num_particles].clone()
+                    deferred_params.remove(q)
+                    log_debug(f"{header}. Using full warm-start for place of {obj} on {surface}")
+                    if config.cache_subgraphs:
+                        self.place_cache[(obj, surface)] = {
+                            "sampled_placements": particles[placement].clone(),
+                            "q": particles[q].clone(),
+                            "grasp": particles[grasp].clone(),
+                            "success_count": num_particles,
+                        }
+                    continue
+
                 if (obj, surface) in self.place_cache:
                     # need to make sure the grasps match what is cached
                     actual_grasp = particles[grasp]
@@ -181,11 +280,11 @@ class ParticleInitializer:
                     # important, we need to clone here
                     sampled_placements = self.place_cache[(obj, surface)]["sampled_placements"].clone()
                     particles[placement] = sampled_placements
-                    ik_result = self.place_cache[(obj, surface)]["ik_result"]
-                    particles[q] = ik_result.solution[:, 0].clone()
+                    particles[q] = self._cache_q(self.place_cache[(obj, surface)])
                     deferred_params.remove(q)
+                    success_count = self._cache_success_count(self.place_cache[(obj, surface)], num_particles)
                     log_debug(
-                        f"{header}. Using cached placement poses for {obj}. {ik_result.success.sum()}/{num_particles} success"
+                        f"{header}. Using cached placement poses for {obj}. {success_count}/{num_particles} success"
                     )
                     continue
 
@@ -216,6 +315,8 @@ class ParticleInitializer:
                 if config.random_init:
                     q_sample = sample_between_bounds(num_particles, world.robot_container.joint_limits)
                     particles[q] = q_sample
+                    success_count = num_particles
+                    ik_result = None
                 else:
                     # Get the hand pose given the placement pose in world frame.
                     # Need to take grasp into account to transform into hand frame.
@@ -233,14 +334,19 @@ class ParticleInitializer:
                         f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
                     )
                     particles[q] = ik_result.solution[:, 0]
+                    success_count = int(ik_result.success.sum().item())
                 deferred_params.remove(q)
+                particles[placement] = self._merge_warmstart(placement, particles[placement], warmstart_particles)
+                particles[q] = self._merge_warmstart(q, particles[q], warmstart_particles)
 
                 # Store in cache
                 if config.cache_subgraphs:
                     self.place_cache[(obj, surface)] = {
-                        "sampled_placements": sampled_placements,
+                        "sampled_placements": particles[placement].clone(),
+                        "q": particles[q].clone(),
                         "ik_result": ik_result,
-                        "grasp": particles[grasp],
+                        "grasp": particles[grasp].clone(),
+                        "success_count": success_count,
                     }
 
             # Push Button (without stick)
@@ -254,6 +360,21 @@ class ParticleInitializer:
                 if q in particles:
                     raise ValueError(f"{q=} shouldn't already be bound")
 
+                if self.latest_retrieval_info["exact_env_match"] and self._has_full_warmstart(
+                    warmstart_particles, push_pose, q
+                ):
+                    particles[push_pose] = warmstart_particles[push_pose][:num_particles].clone()
+                    particles[q] = warmstart_particles[q][:num_particles].clone()
+                    deferred_params.remove(q)
+                    log_debug(f"{header}. Using full warm-start for push on {button}")
+                    if config.cache_subgraphs:
+                        self.push_button_cache[button] = {
+                            "sampled_push": particles[push_pose].clone(),
+                            "q": particles[q].clone(),
+                            "success_count": num_particles,
+                        }
+                    continue
+
                 # Pruning failed subgraphs (i.e., we couldn't push this button at all)
                 if button in self.failed_push and config.skip_failed_subgraphs:
                     return None
@@ -262,11 +383,11 @@ class ParticleInitializer:
                     # important, we need to clone here
                     sampled_push = self.push_button_cache[button]["sampled_push"].clone()
                     particles[push_pose] = sampled_push
-                    ik_result = self.push_button_cache[button]["ik_result"]
-                    particles[q] = ik_result.solution[:, 0].clone()
+                    particles[q] = self._cache_q(self.push_button_cache[button])
                     deferred_params.remove(q)
+                    success_count = self._cache_success_count(self.push_button_cache[button], num_particles)
                     log_debug(
-                        f"{header}. Using cached push poses for {button}. {ik_result.success.sum()}/{num_particles} success"
+                        f"{header}. Using cached push poses for {button}. {success_count}/{num_particles} success"
                     )
                     continue
 
@@ -299,7 +420,10 @@ class ParticleInitializer:
                     f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
                 )
                 particles[q] = ik_result.solution[:, 0]
+                success_count = int(ik_result.success.sum().item())
                 deferred_params.remove(q)
+                particles[push_pose] = self._merge_warmstart(push_pose, particles[push_pose], warmstart_particles)
+                particles[q] = self._merge_warmstart(q, particles[q], warmstart_particles)
 
                 # Failed subgraph!
                 if not ik_result.success.any():
@@ -307,7 +431,12 @@ class ParticleInitializer:
 
                 # Cache the push poses
                 if config.cache_subgraphs:
-                    self.push_button_cache[button] = {"sampled_push": sampled_push, "ik_result": ik_result}
+                    self.push_button_cache[button] = {
+                        "sampled_push": particles[push_pose].clone(),
+                        "q": particles[q].clone(),
+                        "ik_result": ik_result,
+                        "success_count": success_count,
+                    }
 
             # Push Button with Stick
             elif op_name == PushStick.name:
@@ -324,6 +453,22 @@ class ParticleInitializer:
                 if q in particles:
                     raise ValueError(f"{q=} shouldn't already be binded")
 
+                if self.latest_retrieval_info["exact_env_match"] and self._has_full_warmstart(
+                    warmstart_particles, push_pose, q
+                ):
+                    particles[push_pose] = warmstart_particles[push_pose][:num_particles].clone()
+                    particles[q] = warmstart_particles[q][:num_particles].clone()
+                    deferred_params.remove(q)
+                    log_debug(f"{header}. Using full warm-start for stick push on {button}")
+                    if config.cache_subgraphs:
+                        self.push_stick_cache[(button, stick_name)] = {
+                            "sampled_push": particles[push_pose].clone(),
+                            "q": particles[q].clone(),
+                            "grasp": particles[grasp].clone(),
+                            "success_count": num_particles,
+                        }
+                    continue
+
                 if (button, stick_name) in self.push_stick_cache:
                     # need to make sure the grasps match what is cached
                     actual_grasp = particles[grasp]
@@ -334,13 +479,13 @@ class ParticleInitializer:
                     # important, we need to clone here
                     sampled_push = self.push_stick_cache[(button, stick_name)]["sampled_push"].clone()
                     particles[push_pose] = sampled_push
-                    ik_result = self.push_stick_cache[(button, stick_name)]["ik_result"]
-                    particles[q] = ik_result.solution[:, 0].clone()
+                    particles[q] = self._cache_q(self.push_stick_cache[(button, stick_name)])
                     deferred_params.remove(q)
+                    success_count = self._cache_success_count(self.push_stick_cache[(button, stick_name)], num_particles)
 
                     log_debug(
                         f"{header}. Using cached push for {button} with {stick_name}. "
-                        f"{ik_result.success.sum()}/{num_particles} success"
+                        f"{success_count}/{num_particles} success"
                     )
                     continue
 
@@ -400,14 +545,19 @@ class ParticleInitializer:
                     f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
                 )
                 particles[q] = ik_result.solution[:, 0]
+                success_count = int(ik_result.success.sum().item())
                 deferred_params.remove(q)
+                particles[push_pose] = self._merge_warmstart(push_pose, particles[push_pose], warmstart_particles)
+                particles[q] = self._merge_warmstart(q, particles[q], warmstart_particles)
 
                 # Store in cache
                 if config.cache_subgraphs:
                     self.push_stick_cache[(button, stick_name)] = {
-                        "sampled_push": sampled_push,
+                        "sampled_push": particles[push_pose].clone(),
+                        "q": particles[q].clone(),
                         "ik_result": ik_result,
-                        "grasp": particles[grasp],
+                        "grasp": particles[grasp].clone(),
+                        "success_count": success_count,
                     }
 
             # Unknown

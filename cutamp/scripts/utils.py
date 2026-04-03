@@ -9,6 +9,9 @@
 
 import logging
 import sys
+from typing import Optional
+
+import torch
 
 from cutamp.task_planning.constraints import KinematicConstraint, StablePlacement, Collision, Motion, ValidPush
 from cutamp.task_planning.costs import TrajectoryLength
@@ -115,3 +118,13 @@ def setup_logging():
     logging.getLogger("curobo").setLevel(logging.WARNING)
     logging.getLogger("cutamp").setLevel(logging.DEBUG)
     logging.getLogger("__main__").setLevel(logging.DEBUG)
+
+
+def set_random_seed(seed: Optional[int]):
+    """Set PyTorch RNG state for reproducible sampling."""
+    if seed is None:
+        return
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
