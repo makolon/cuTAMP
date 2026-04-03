@@ -105,12 +105,22 @@ class TAMPConfiguration:
     enable_retrieval: bool = False
     # Root directory containing experiment logs to search for retrieval artifacts. If None, use experiment_root.
     retrieval_root: Optional[str] = None
-    # Number of particles to populate from retrieval before filling the rest from standard initialization.
-    retrieval_num_particles: int = 1024
-    # Gaussian noise scale applied to retrieved particles. Defaults to 0 for exact replay.
-    retrieval_noise_scale: float = 0.0
+    # Number of particles to populate from retrieval for approximate matches before filling the rest normally.
+    retrieval_num_particles: int = 64
+    # Maximum environment distance allowed for approximate retrieval. If None, allow any distance.
+    retrieval_max_env_distance: Optional[float] = 0.12
+    # Approximate matches with fewer saved particles than this are ignored to preserve diversity.
+    retrieval_min_approx_saved_particles: int = 4
+    # Relative weight of movable yaw differences when scoring approximate retrieval matches.
+    retrieval_approx_movable_yaw_weight: float = 0.0
+    # Relative weight of static-object yaw differences when scoring approximate retrieval matches.
+    retrieval_approx_static_yaw_weight: float = 1.0
+    # Gaussian noise scale applied only to approximate retrieved particles.
+    retrieval_noise_scale: float = 0.01
     # Pose-distance threshold below which a retrieved task is treated as an exact environment match.
     retrieval_exact_env_tol: float = 1e-3
+    # Number of particles to persist in each retrieval artifact.
+    retrieval_num_saved_particles: int = 32
     # Whether to save warm-start artifacts for future retrieval.
     save_retrieval_artifacts: bool = True
 
@@ -156,9 +166,34 @@ def validate_tamp_config(config: TAMPConfiguration):
         raise ValueError(
             f"retrieval_noise_scale must be non-negative when retrieval is enabled, not {config.retrieval_noise_scale}"
         )
+    if config.enable_retrieval and config.retrieval_approx_movable_yaw_weight < 0:
+        raise ValueError(
+            "retrieval_approx_movable_yaw_weight must be non-negative when retrieval is enabled, "
+            f"not {config.retrieval_approx_movable_yaw_weight}"
+        )
+    if config.enable_retrieval and config.retrieval_approx_static_yaw_weight < 0:
+        raise ValueError(
+            "retrieval_approx_static_yaw_weight must be non-negative when retrieval is enabled, "
+            f"not {config.retrieval_approx_static_yaw_weight}"
+        )
+    if config.enable_retrieval and config.retrieval_max_env_distance is not None and config.retrieval_max_env_distance < 0:
+        raise ValueError(
+            "retrieval_max_env_distance must be non-negative or None when retrieval is enabled, "
+            f"not {config.retrieval_max_env_distance}"
+        )
     if config.enable_retrieval and config.retrieval_exact_env_tol < 0:
         raise ValueError(
             f"retrieval_exact_env_tol must be non-negative when retrieval is enabled, not {config.retrieval_exact_env_tol}"
+        )
+    if config.enable_retrieval and config.retrieval_num_saved_particles <= 0:
+        raise ValueError(
+            "retrieval_num_saved_particles must be positive when retrieval is enabled, "
+            f"not {config.retrieval_num_saved_particles}"
+        )
+    if config.enable_retrieval and config.retrieval_min_approx_saved_particles <= 0:
+        raise ValueError(
+            "retrieval_min_approx_saved_particles must be positive when retrieval is enabled, "
+            f"not {config.retrieval_min_approx_saved_particles}"
         )
 
     # Collision checking

@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+from cutamp.config import TAMPConfiguration
+
 
 def _build_demo_command(args: argparse.Namespace, seed: int, experiment_id: str) -> list[str]:
     cmd = [
@@ -48,6 +50,7 @@ def _build_demo_command(args: argparse.Namespace, seed: int, experiment_id: str)
         cmd.append("--disable_visualizer")
     if args.disable_robot_mesh:
         cmd.append("--disable_robot_mesh")
+    cmd.extend(["--retrieval_num_saved_particles", str(args.retrieval_num_saved_particles)])
     return cmd
 
 
@@ -71,6 +74,9 @@ def entrypoint():
     parser.add_argument("--grasp_dof", choices=[4, 6], type=int, default=4)
     parser.add_argument("--motion_plan", action="store_true")
     parser.add_argument("--cache_subgraphs", action="store_true")
+    parser.add_argument(
+        "--retrieval_num_saved_particles", type=int, default=TAMPConfiguration.retrieval_num_saved_particles
+    )
     parser.add_argument("--tuned_tetris_weights", action="store_true")
     parser.add_argument("--tetris_random_yaws", action="store_true")
     parser.add_argument("--enable_visualizer", action="store_true")

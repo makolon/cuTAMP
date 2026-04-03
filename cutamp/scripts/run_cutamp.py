@@ -183,20 +183,50 @@ def entrypoint():
     parser.add_argument(
         "--retrieval_num_particles",
         type=int,
-        default=None,
-        help="Number of particles to populate from retrieval before filling the rest with standard initialization.",
+        default=TAMPConfiguration.retrieval_num_particles,
+        help="Number of particles to warm start for approximate retrieval matches. Exact matches may expand to the full batch.",
+    )
+    parser.add_argument(
+        "--retrieval_max_env_distance",
+        type=float,
+        default=TAMPConfiguration.retrieval_max_env_distance,
+        help="Maximum environment distance allowed for approximate retrieval matches. Use a negative value to disable the limit.",
     )
     parser.add_argument(
         "--retrieval_noise_scale",
         type=float,
-        default=0.0,
-        help="Gaussian noise scale applied to retrieved particles.",
+        default=TAMPConfiguration.retrieval_noise_scale,
+        help="Gaussian noise scale applied to approximate retrieved particles.",
     )
     parser.add_argument(
         "--retrieval_exact_env_tol",
         type=float,
-        default=1e-3,
+        default=TAMPConfiguration.retrieval_exact_env_tol,
         help="Environment pose-distance threshold used to treat a retrieved task as an exact match.",
+    )
+    parser.add_argument(
+        "--retrieval_min_approx_saved_particles",
+        type=int,
+        default=TAMPConfiguration.retrieval_min_approx_saved_particles,
+        help="Minimum number of saved particles required before using an approximate retrieval match.",
+    )
+    parser.add_argument(
+        "--retrieval_approx_movable_yaw_weight",
+        type=float,
+        default=TAMPConfiguration.retrieval_approx_movable_yaw_weight,
+        help="Yaw weight for movable objects when scoring approximate retrieval matches.",
+    )
+    parser.add_argument(
+        "--retrieval_approx_static_yaw_weight",
+        type=float,
+        default=TAMPConfiguration.retrieval_approx_static_yaw_weight,
+        help="Yaw weight for static objects when scoring approximate retrieval matches.",
+    )
+    parser.add_argument(
+        "--retrieval_num_saved_particles",
+        type=int,
+        default=TAMPConfiguration.retrieval_num_saved_particles,
+        help="Number of particles to persist in each retrieval artifact for future warm starts.",
     )
 
     # Tetris tuned weights
@@ -206,6 +236,10 @@ def entrypoint():
 
     # We only expose a subset of the full TAMPConfiguration. Check config.py for the full configuration.
     args = parser.parse_args()
+    retrieval_max_env_distance = args.retrieval_max_env_distance
+    if retrieval_max_env_distance is not None and retrieval_max_env_distance < 0:
+        retrieval_max_env_distance = None
+
     config = TAMPConfiguration(
         seed=args.seed,
         num_particles=args.num_particles,
@@ -226,9 +260,14 @@ def entrypoint():
         experiment_root=args.experiment_root,
         enable_retrieval=args.enable_retrieval,
         retrieval_root=args.retrieval_root,
-        retrieval_num_particles=args.retrieval_num_particles or args.num_particles,
+        retrieval_num_particles=args.retrieval_num_particles,
+        retrieval_max_env_distance=retrieval_max_env_distance,
+        retrieval_min_approx_saved_particles=args.retrieval_min_approx_saved_particles,
+        retrieval_approx_movable_yaw_weight=args.retrieval_approx_movable_yaw_weight,
+        retrieval_approx_static_yaw_weight=args.retrieval_approx_static_yaw_weight,
         retrieval_noise_scale=args.retrieval_noise_scale,
         retrieval_exact_env_tol=args.retrieval_exact_env_tol,
+        retrieval_num_saved_particles=args.retrieval_num_saved_particles,
     )
     validate_tamp_config(config)
 

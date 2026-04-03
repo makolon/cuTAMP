@@ -31,10 +31,12 @@ _PLACEHOLDER_TYPES = {Conf, Grasp, Pose, Traj}
 class RetrievalMatch:
     particles: Particles
     score: float
+    exact_score: float
     source_experiment: str
     source_artifact: str
     exact_env_match: bool
     num_particles: int
+    num_saved_particles: int
 
 
 def _wrap_to_pi(vals: torch.Tensor) -> torch.Tensor:
@@ -66,7 +68,12 @@ def build_env_metadata(env: TAMPEnvironment) -> dict[str, Any]:
     }
 
 
-def env_distance(query: dict[str, Any], candidate: dict[str, Any]) -> float:
+def env_distance(
+    query: dict[str, Any],
+    candidate: dict[str, Any],
+    movable_yaw_weight: float = 1.0,
+    static_yaw_weight: float = 1.0,
+) -> float:
     if query["env_name"] != candidate["env_name"]:
         return float("inf")
     if query["goal"] != candidate["goal"]:
@@ -80,13 +87,15 @@ def env_distance(query: dict[str, Any], candidate: dict[str, Any]) -> float:
         return float("inf")
 
     total = 0.0
+    movable_names = set(query["types"].get("Movable", []))
     for name, query_pose in query_poses.items():
         cand_pose = candidate_poses[name]
         query_xyz = torch.tensor(query_pose["xyz"])
         cand_xyz = torch.tensor(cand_pose["xyz"])
         xyz_dist = torch.linalg.norm(query_xyz - cand_xyz).item()
         yaw_dist = abs(math.atan2(math.sin(query_pose["yaw"] - cand_pose["yaw"]), math.cos(query_pose["yaw"] - cand_pose["yaw"])))
-        total += xyz_dist + yaw_dist
+        yaw_weight = movable_yaw_weight if name in movable_names else static_yaw_weight
+        total += xyz_dist + yaw_weight * yaw_dist
     return total / max(len(query_poses), 1)
 
 
@@ -260,8 +269,11 @@ def get_elite_particles(
     config: TAMPConfiguration,
     constraint_checker: ConstraintChecker,
     cost_reducer: CostReducer,
-    max_elites: int = 32,
+    max_elites: Optional[int] = None,
 ) -> Optional[Particles]:
+    if max_elites is None:
+        max_elites = config.retrieval_num_saved_particles
+
     particles = plan_info["particles"]
     rollout_fn = plan_info["rollout_fn"]
     cost_fn = plan_info["cost_fn"]
@@ -278,10 +290,18 @@ def get_elite_particles(
     if config.optimize_soft_costs:
         consider_types.add("cost")
     costs = cost_reducer(cost_dict, consider_types=consider_types)
+    hard_costs = cost_reducer.hard_costs(cost_dict)
 
-    satisfying_indices = torch.arange(config.num_particles, device=costs.device)[satisfying_mask]
-    elite_local = costs[satisfying_mask].argsort()[:max_elites]
-    elite_idx = satisfying_indices[elite_local]
+    all_indices = torch.arange(config.num_particles, device=costs.device)
+    ranked_indices = sorted(
+        all_indices.tolist(),
+        key=lambda idx: (
+            0 if satisfying_mask[idx].item() else 1,
+            hard_costs[idx].item(),
+            costs[idx].item(),
+        ),
+    )
+    elite_idx = torch.tensor(ranked_indices[:max_elites], device=costs.device)
     elite_particles = {name: values[elite_idx].detach().cpu().clone() for name, values in particles.items()}
     return elite_particles
 
@@ -373,6 +393,7 @@ class RetrievalWarmStarter:
 
         best_manifest = None
         best_score = float("inf")
+        best_exact_score = float("inf")
         for manifest in manifests:
             if manifest.get("plan_signature_hash") != query_signature_hash:
                 continue
@@ -383,9 +404,15 @@ class RetrievalWarmStarter:
             if manifest.get("place_dof") != self.config.place_dof:
                 continue
 
-            score = env_distance(query_env_metadata, manifest["env_metadata"])
+            score = env_distance(
+                query_env_metadata,
+                manifest["env_metadata"],
+                movable_yaw_weight=self.config.retrieval_approx_movable_yaw_weight,
+                static_yaw_weight=self.config.retrieval_approx_static_yaw_weight,
+            )
             if score < best_score:
                 best_score = score
+                best_exact_score = env_distance(query_env_metadata, manifest["env_metadata"])
                 best_manifest = manifest
 
         if best_manifest is None or math.isinf(best_score):
@@ -399,7 +426,20 @@ class RetrievalWarmStarter:
             _log.warning(f"Failed to load retrieval payload {tensor_path}: {exc}")
             return {}
 
-        desired_count = min(self.config.retrieval_num_particles, self.config.num_particles)
+        exact_env_match = best_exact_score <= self.config.retrieval_exact_env_tol
+        saved_count = int(best_manifest.get("num_saved_particles", 0))
+        if not exact_env_match:
+            if (
+                self.config.retrieval_max_env_distance is not None
+                and best_score > self.config.retrieval_max_env_distance
+            ):
+                return {}
+            if saved_count < self.config.retrieval_min_approx_saved_particles:
+                return {}
+
+        desired_count = self.config.num_particles if exact_env_match else min(
+            self.config.retrieval_num_particles, self.config.num_particles, saved_count * 2
+        )
         warmstart_particles = {}
         slot_metadata = best_manifest["slot_metadata"]
         for slot in _iter_warmstart_slots(plan_skeleton):
@@ -415,7 +455,8 @@ class RetrievalWarmStarter:
                 dtype=self.world.q_init.dtype,
             )
             restored = _repeat_to_length(restored, desired_count)
-            restored = _apply_noise(restored, slot["param_type"], self.config.retrieval_noise_scale)
+            noise_scale = 0.0 if exact_env_match else self.config.retrieval_noise_scale
+            restored = _apply_noise(restored, slot["param_type"], noise_scale)
             warmstart_particles[param_name] = restored
 
         if not warmstart_particles:
@@ -424,9 +465,11 @@ class RetrievalWarmStarter:
         self.last_match = RetrievalMatch(
             particles=warmstart_particles,
             score=best_score,
+            exact_score=best_exact_score,
             source_experiment=best_manifest["experiment_id"],
             source_artifact=str(tensor_path),
-            exact_env_match=best_score <= self.config.retrieval_exact_env_tol,
+            exact_env_match=exact_env_match,
             num_particles=desired_count,
+            num_saved_particles=saved_count,
         )
         return warmstart_particles

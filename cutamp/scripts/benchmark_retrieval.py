@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from cutamp.config import TAMPConfiguration
+
 
 def _metric_total(timer_metrics: dict, name: str) -> Optional[float]:
     metric = timer_metrics.get(name)
@@ -58,17 +60,30 @@ def _build_demo_command(args: argparse.Namespace, seed: int, experiment_id: str,
     if args.disable_robot_mesh:
         cmd.append("--disable_robot_mesh")
     if enable_retrieval:
+        retrieval_max_env_distance = (
+            str(args.retrieval_max_env_distance) if args.retrieval_max_env_distance is not None else "-1"
+        )
         cmd.extend(
             [
                 "--enable_retrieval",
                 "--retrieval_root",
                 args.retrieval_root,
                 "--retrieval_num_particles",
-                str(args.retrieval_num_particles or args.num_particles),
+                str(args.retrieval_num_particles),
+                "--retrieval_max_env_distance",
+                retrieval_max_env_distance,
                 "--retrieval_noise_scale",
                 str(args.retrieval_noise_scale),
                 "--retrieval_exact_env_tol",
                 str(args.retrieval_exact_env_tol),
+                "--retrieval_min_approx_saved_particles",
+                str(args.retrieval_min_approx_saved_particles),
+                "--retrieval_approx_movable_yaw_weight",
+                str(args.retrieval_approx_movable_yaw_weight),
+                "--retrieval_approx_static_yaw_weight",
+                str(args.retrieval_approx_static_yaw_weight),
+                "--retrieval_num_saved_particles",
+                str(args.retrieval_num_saved_particles),
             ]
         )
     return cmd
@@ -93,10 +108,13 @@ def _run_case(args: argparse.Namespace, seed: int, experiment_id: str, enable_re
         "wall_time_sec": wall_time,
         "found_solution": overall_metrics["found_solution"],
         "num_satisfying_final": overall_metrics["num_satisfying_final"],
+        "num_optimized_plans": overall_metrics["num_optimized_plans"],
         "retrieval_info": overall_metrics.get("retrieval"),
         "sample_initial_plans_sec": _metric_total(timer_metrics, "sample_initial_plans"),
         "start_optimization_sec": _metric_total(timer_metrics, "start_optimization"),
         "initialize_particles_sec": _metric_total(timer_metrics, "initialize_particles"),
+        "first_solution_sec": _metric_total(timer_metrics, "first_solution"),
+        "optimization_step_count": (timer_metrics.get("optimization_step") or {}).get("count"),
     }
 
 
@@ -125,9 +143,32 @@ def entrypoint():
     parser.add_argument("--max_duration", type=float, default=None)
     parser.add_argument("--robot", choices=["panda", "ur5"], default="panda")
     parser.add_argument("--grasp_dof", choices=[4, 6], type=int, default=4)
-    parser.add_argument("--retrieval_num_particles", type=int, default=None)
-    parser.add_argument("--retrieval_noise_scale", type=float, default=0.0)
-    parser.add_argument("--retrieval_exact_env_tol", type=float, default=1e-3)
+    parser.add_argument("--retrieval_num_particles", type=int, default=TAMPConfiguration.retrieval_num_particles)
+    parser.add_argument(
+        "--retrieval_max_env_distance", type=float, default=TAMPConfiguration.retrieval_max_env_distance
+    )
+    parser.add_argument("--retrieval_noise_scale", type=float, default=TAMPConfiguration.retrieval_noise_scale)
+    parser.add_argument("--retrieval_exact_env_tol", type=float, default=TAMPConfiguration.retrieval_exact_env_tol)
+    parser.add_argument(
+        "--retrieval_min_approx_saved_particles",
+        type=int,
+        default=TAMPConfiguration.retrieval_min_approx_saved_particles,
+    )
+    parser.add_argument(
+        "--retrieval_approx_movable_yaw_weight",
+        type=float,
+        default=TAMPConfiguration.retrieval_approx_movable_yaw_weight,
+    )
+    parser.add_argument(
+        "--retrieval_approx_static_yaw_weight",
+        type=float,
+        default=TAMPConfiguration.retrieval_approx_static_yaw_weight,
+    )
+    parser.add_argument(
+        "--retrieval_num_saved_particles",
+        type=int,
+        default=TAMPConfiguration.retrieval_num_saved_particles,
+    )
     parser.add_argument("--motion_plan", action="store_true")
     parser.add_argument("--cache_subgraphs", action="store_true")
     parser.add_argument("--tuned_tetris_weights", action="store_true")

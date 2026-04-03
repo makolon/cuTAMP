@@ -10,6 +10,7 @@
 """Core cuTAMP algorithm implementation."""
 
 import logging
+import time
 from datetime import datetime
 from typing import List, Union, Optional, Tuple
 from unittest.mock import Mock
@@ -36,6 +37,59 @@ from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
 
 _log = logging.getLogger(__name__)
+
+
+def _sync_perf_counter() -> float:
+    torch.cuda.synchronize()
+    return time.perf_counter()
+
+
+def _metric_total(timer_summaries: dict, name: str) -> float:
+    metric = timer_summaries.get(name)
+    if metric is None:
+        return 0.0
+    return float(metric["total"])
+
+
+def _build_timing_breakdown(timer_summaries: dict, plan_timing_rows: list[dict], overall_metrics: dict) -> dict:
+    return {
+        "notes": [
+            "top_level_sec contains the main wall-clock phases for the run.",
+            "detail sections are nested breakdowns and should not be summed together with top-level phases.",
+        ],
+        "top_level_sec": {
+            "load_tamp_world": _metric_total(timer_summaries, "load_tamp_world"),
+            "warmup_ik_solver": _metric_total(timer_summaries, "warmup_ik_solver"),
+            "warmup_motion_gen": _metric_total(timer_summaries, "curobo_motion_gen_warmup"),
+            "get_plan_generator": _metric_total(timer_summaries, "get_plan_generator"),
+            "sample_initial_plans": _metric_total(timer_summaries, "sample_initial_plans"),
+            "sort_plans": _metric_total(timer_summaries, "sort_plans"),
+            "start_optimization": _metric_total(timer_summaries, "start_optimization"),
+            "curobo_planning": _metric_total(timer_summaries, "curobo_planning"),
+        },
+        "sampling_detail_sec": {
+            "task_plan_next": _metric_total(timer_summaries, "task_plan_next"),
+            "sample_plan_skeleton_total": _metric_total(timer_summaries, "sample_plan_skeleton_total"),
+            "initialize_particles": _metric_total(timer_summaries, "initialize_particles"),
+            "measure_heuristic": _metric_total(timer_summaries, "measure_heuristic"),
+            "get_satisfying_mask": _metric_total(timer_summaries, "get_satisfying_mask"),
+            "compute_best_cost": _metric_total(timer_summaries, "compute_best_cost"),
+        },
+        "optimization_detail_sec": {
+            "optimize_plan_total": _metric_total(timer_summaries, "optimize_plan_total"),
+            "setup_optimizer": _metric_total(timer_summaries, "setup_optimizer"),
+            "optimization_step": _metric_total(timer_summaries, "optimization_step"),
+            "resample_duration": _metric_total(timer_summaries, "resample_duration"),
+            "resample_plan_info": _metric_total(timer_summaries, "resample_plan_info"),
+            "visualize_opt_rollout": _metric_total(timer_summaries, "visualize_opt_rollout"),
+            "visualize_rollout": _metric_total(timer_summaries, "visualize_rollout"),
+        },
+        "counts": {
+            "sampled_plan_skeletons": len([row for row in plan_timing_rows if row.get("plan_skeleton") is not None]),
+            "failed_subgraphs": len([row for row in plan_timing_rows if row.get("failed_subgraph")]),
+            "optimized_plans": overall_metrics["num_optimized_plans"],
+        },
+    }
 
 
 def heuristic_fn(
@@ -110,7 +164,8 @@ def sample_plan_skeleton(
     constraint_checker: ConstraintChecker,
     cost_reducer: CostReducer,
     particle_initializer: ParticleInitializer,
-) -> Tuple[Union[dict, None], bool]:
+    task_plan_next_sec: Optional[float] = None,
+) -> Tuple[Union[dict, None], bool, dict]:
     """
     Try sampling particles for a plan skeleton and compute the heuristic.
     Returns the plan_info dict and whether any satisfying particles were found upon initialization.
@@ -118,23 +173,42 @@ def sample_plan_skeleton(
     plan_str = [op.name for op in plan_skeleton]
     _log.debug(f"[Plan {plan_count + 1}] Sampled plan {plan_str}")
 
+    sample_start = _sync_perf_counter()
+
     # Sample particles
-    with timer.time("initialize_particles"):
-        plan_particles = particle_initializer(plan_skeleton)
+    timer.start("initialize_particles")
+    plan_particles = particle_initializer(plan_skeleton)
+    initialize_particles_sec = timer.stop("initialize_particles")
     if plan_particles is None:  # failed subgraph
-        return None, False
+        sample_timings = {
+            "plan_idx": plan_count,
+            "plan_skeleton": [str(op) for op in plan_skeleton],
+            "task_plan_next_sec": task_plan_next_sec,
+            "sample_plan_total_sec": _sync_perf_counter() - sample_start,
+            "initialize_particles_sec": initialize_particles_sec,
+            "measure_heuristic_sec": 0.0,
+            "get_satisfying_mask_sec": 0.0,
+            "compute_best_cost_sec": 0.0,
+            "failed_subgraph": True,
+            "retrieval": particle_initializer.latest_retrieval_info.copy(),
+        }
+        timer._metrics["sample_plan_skeleton_total"].append(sample_timings["sample_plan_total_sec"])
+        return None, False, sample_timings
 
     # Rollout particles and compute costs
     rollout_fn = RolloutFunction(plan_skeleton, world, config)
     cost_fn = CostFunction(plan_skeleton, world, config)
-    with timer.time("measure_heuristic"), torch.no_grad():
+    timer.start("measure_heuristic")
+    with torch.no_grad():
         rollout = rollout_fn(plan_particles)
         cost_dict = cost_fn(rollout)
         heuristic = heuristic_fn(plan_skeleton, cost_dict, constraint_checker)
+    measure_heuristic_sec = timer.stop("measure_heuristic")
 
     # Number of satisfying particles
-    with timer.time("get_satisfying_mask"):
-        satisfying_mask = constraint_checker.get_mask(cost_dict)
+    timer.start("get_satisfying_mask")
+    satisfying_mask = constraint_checker.get_mask(cost_dict)
+    get_satisfying_mask_sec = timer.stop("get_satisfying_mask")
     num_satisfying = satisfying_mask.sum().item()
 
     if config.stick_button_experiment and num_satisfying > 0:
@@ -143,16 +217,19 @@ def sample_plan_skeleton(
         print(f"Found satisfying plan: {plan_str} heuristic -= 100")
 
     # Best cost initially
-    with timer.time("compute_best_cost"):
-        consider_types = {"constraint"}
-        if config.optimize_soft_costs:
-            consider_types.add("cost")
-        costs = cost_reducer(cost_dict, consider_types=consider_types)
-        if satisfying_mask.any():
-            best_cost = costs[satisfying_mask].min().item()
-            best_soft_cost = cost_reducer.soft_costs(cost_dict)[satisfying_mask].min().item()
-        else:
-            best_cost, best_soft_cost = float("inf"), float("inf")
+    timer.start("compute_best_cost")
+    consider_types = {"constraint"}
+    if config.optimize_soft_costs:
+        consider_types.add("cost")
+    costs = cost_reducer(cost_dict, consider_types=consider_types)
+    if satisfying_mask.any():
+        best_cost = costs[satisfying_mask].min().item()
+        best_soft_cost = cost_reducer.soft_costs(cost_dict)[satisfying_mask].min().item()
+    else:
+        best_cost, best_soft_cost = float("inf"), float("inf")
+    compute_best_cost_sec = timer.stop("compute_best_cost")
+    sample_plan_total_sec = _sync_perf_counter() - sample_start
+    timer._metrics["sample_plan_skeleton_total"].append(sample_plan_total_sec)
 
     plan_info = {
         "idx": plan_count,
@@ -166,12 +243,30 @@ def sample_plan_skeleton(
         "best_soft_cost": best_soft_cost,
         "retrieval": particle_initializer.latest_retrieval_info.copy(),
     }
+    sample_timings = {
+        "plan_idx": plan_count,
+        "plan_skeleton": [str(op) for op in plan_skeleton],
+        "task_plan_next_sec": task_plan_next_sec,
+        "sample_plan_total_sec": sample_plan_total_sec,
+        "initialize_particles_sec": initialize_particles_sec,
+        "measure_heuristic_sec": measure_heuristic_sec,
+        "get_satisfying_mask_sec": get_satisfying_mask_sec,
+        "compute_best_cost_sec": compute_best_cost_sec,
+        "failed_subgraph": False,
+        "heuristic": heuristic,
+        "num_satisfying_initial": num_satisfying,
+        "best_cost_initial": best_cost,
+        "best_soft_cost_initial": best_soft_cost,
+        "retrieval": particle_initializer.latest_retrieval_info.copy(),
+        "optimized": False,
+    }
+    plan_info["timing_entry"] = sample_timings
 
     _log.debug(
         f"[Plan {plan_count + 1}] {plan_info['num_satisfying']}/{config.num_particles} satisfying, "
         f"heuristic = {plan_info['heuristic']}"
     )
-    return plan_info, num_satisfying > 0
+    return plan_info, num_satisfying > 0, sample_timings
 
 
 def resample_plan_info(
@@ -314,18 +409,31 @@ def run_cutamp(
     # Sample initial plans and particles
     found_solution_initially = False
     num_skipped_plans = 0
+    plan_timing_rows = []
     with timer.time("sample_initial_plans", log_callback=_log.info):
         plan_queue: List[dict] = []
         plan_count = 0
         for idx in range(config.num_initial_plans):
+            timer.start("task_plan_next")
             plan_skeleton = next(plan_gen, None)
+            task_plan_next_sec = timer.stop("task_plan_next")
             if plan_skeleton is None:
                 _log.info("Ran out of plans to sample")
                 break
 
-            plan_info, has_solution = sample_plan_skeleton(
-                plan_skeleton, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
+            plan_info, has_solution, sample_timings = sample_plan_skeleton(
+                plan_skeleton,
+                world,
+                config,
+                timer,
+                idx,
+                constraint_checker,
+                cost_reducer,
+                particle_initializer,
+                task_plan_next_sec=task_plan_next_sec,
             )
+            sample_timings["sample_order"] = idx
+            plan_timing_rows.append(sample_timings)
             if plan_info is None:
                 _log.debug("failed subgraph, skipping...")
                 num_skipped_plans += 1
@@ -340,7 +448,14 @@ def run_cutamp(
     # Sort plans by heuristic
     def sort_plans():
         with timer.time("sort_plans"):
-            plan_queue.sort(key=lambda x: (0 if x.get("retrieval", {}).get("hit") else 1, x["heuristic"]))
+            plan_queue.sort(
+                key=lambda x: (
+                    0 if x.get("retrieval", {}).get("exact_env_match") else 1,
+                    0 if x.get("retrieval", {}).get("hit") else 1,
+                    x.get("retrieval", {}).get("score", float("inf")),
+                    x["heuristic"],
+                )
+            )
 
     sort_plans()
     _log.info(f"Num plans: {len(plan_queue)}, num skipped: {num_skipped_plans}")
@@ -373,6 +488,14 @@ def run_cutamp(
             f"heuristic = {plan_info['heuristic']:.2f}"
         )
         best_particle = None
+        timing_entry = plan_info.get("timing_entry")
+        if timing_entry is not None:
+            timing_entry["optimized"] = True
+            timing_entry["optimization_order"] = opt_iter
+            timing_entry["queue_order"] = idx
+
+        plan_opt_start = _sync_perf_counter()
+        timer.start("optimize_plan_total")
 
         if config.approach == "optimization":
             has_satisfying, metrics, time_exceeded = particle_optimizer(plan_info, timer, visualizer)
@@ -496,6 +619,22 @@ def run_cutamp(
                     mat4x4_last = rollout["obj_to_pose"][obj][0, -1]
                     visualizer.log_mat4x4(f"world/{obj}", mat4x4_last)
 
+        optimize_plan_total_sec = timer.stop("optimize_plan_total")
+        if timing_entry is not None:
+            timing_entry["optimization_total_sec"] = optimize_plan_total_sec
+            timing_entry["optimization_wall_sec"] = _sync_perf_counter() - plan_opt_start
+            timing_entry["found_solution_after_optimization"] = has_satisfying
+            timing_entry["num_satisfying_final"] = metrics["num_satisfying_final"]
+            timing_entry["best_cost_final"] = metrics.get("best_cost")
+            timing_entry["best_soft_cost_final"] = metrics.get("best_soft_cost")
+            timing_entry["retrieval"] = plan_info.get("retrieval", {})
+            if config.approach == "optimization":
+                timing_entry["optimization_step_count"] = len(metrics.get("num_satisfying", []))
+                timing_entry["opt_start_to_first_solution_sec"] = metrics.get("opt_start_to_first_sol")
+            else:
+                timing_entry["resample_attempts"] = metrics.get("num_resample_attempts")
+                timing_entry["resample_duration_sec"] = metrics.get("resample_duration")
+
         # Now we've either optimized or resampled
         overall_metrics["num_optimized_plans"] += 1
         if has_satisfying:
@@ -535,8 +674,11 @@ def run_cutamp(
 
     # Dump metrics out
     overall_metrics["found_solution"] = found_solution
+    timer_summaries = timer.get_summaries()
     exp_logger.log_dict("overall_metrics", overall_metrics)
-    exp_logger.log_dict("timer_metrics", timer.get_summaries())
+    exp_logger.log_dict("timer_metrics", timer_summaries)
+    exp_logger.log_dict("plan_timing_metrics", {"plans": plan_timing_rows})
+    exp_logger.log_dict("timing_breakdown", _build_timing_breakdown(timer_summaries, plan_timing_rows, overall_metrics))
 
     # Save retrieval artifact for future warm starts
     if found_solution and config.enable_experiment_logging and config.save_retrieval_artifacts and final_plan_info is not None:

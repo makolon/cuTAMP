@@ -62,9 +62,12 @@ class ParticleInitializer:
         self.latest_retrieval_info = {
             "hit": False,
             "num_particles": 0,
+            "num_saved_particles": 0,
+            "exact_score": None,
             "exact_env_match": False,
             "source_experiment": None,
             "score": None,
+            "source_artifact": None,
         }
 
     def _cache_success_count(self, cache_entry: dict, fallback: int) -> int:
@@ -108,6 +111,8 @@ class ParticleInitializer:
             self.latest_retrieval_info = {
                 "hit": True,
                 "num_particles": self.retriever.last_match.num_particles,
+                "num_saved_particles": self.retriever.last_match.num_saved_particles,
+                "exact_score": self.retriever.last_match.exact_score,
                 "exact_env_match": self.retriever.last_match.exact_env_match,
                 "source_experiment": self.retriever.last_match.source_experiment,
                 "score": self.retriever.last_match.score,
@@ -115,15 +120,19 @@ class ParticleInitializer:
             }
             log_debug(
                 f"Warm-start hit from {self.retriever.last_match.source_experiment} "
-                f"(score={self.retriever.last_match.score:.4f}, exact={self.retriever.last_match.exact_env_match})"
+                f"(score={self.retriever.last_match.score:.4f}, exact_score={self.retriever.last_match.exact_score:.4f}, "
+                f"exact={self.retriever.last_match.exact_env_match})"
             )
         else:
             self.latest_retrieval_info = {
                 "hit": False,
                 "num_particles": 0,
+                "num_saved_particles": 0,
+                "exact_score": None,
                 "exact_env_match": False,
                 "source_experiment": None,
                 "score": None,
+                "source_artifact": None,
             }
 
         # Note: we don't consider state after executing earlier samples
