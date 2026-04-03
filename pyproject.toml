@@ -20,6 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
+    # Core
     "einops",
     "jaxtyping",
     "omegaconf",
@@ -32,8 +33,12 @@ dependencies = [
     "torch==2.7.0",
     "torchaudio==2.7.0",
     "torchvision==0.22.0",
+    # VLM stacks
+    "flash-linear-attention>=0.4.2",
+    "transformers==5.4.0",
     # Third-party integrations
-    "curobo",
+    "causal-conv1d",
+    "nvidia-curobo",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +62,8 @@ torch = { index = "torch" }
 torchvision = { index = "torch" }
 
 # Git sources
-curobo = { git = "https://github.com/NVlabs/curobo.git" }
+causal-conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git" }
+nvidia-curobo = { git = "https://github.com/NVlabs/curobo.git" }
 
 [[tool.uv.index]]
 explicit = true

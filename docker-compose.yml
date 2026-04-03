@@ -55,7 +55,7 @@ services:
     environment:
       <<: *default-cutamp-environment
     ports:
-      - "${WEB_PORT:-6080}:6080"
+      - "${WEB_PORT:-6180}:6180"
     volumes:
       - "/tmp/.X11-unix:/tmp/.X11-unix:rw"
     security_opt:
