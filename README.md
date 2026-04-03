@@ -116,6 +116,7 @@ cutamp-demo
 
 This runs the [cutamp/scripts/run_cutamp.py](cutamp/scripts/run_cutamp.py) script with the default parameters on the
 Tetris environment with 3 blocks. We use [Rerun](https://rerun.io/) to visualize the optimization and plan.
+Experiment logs are saved under `logs/cutamp-experiments/<experiment_id>` by default.
 
 - If you're on a machine with a display, you're now good to go!
 - If you're on a **remote or headless machine** (i.e., no display), see the instructions below on how to run with or

@@ -150,7 +150,10 @@ def entrypoint():
         help="Disable robot mesh visualization to save visualization bandwidth.",
     )
     parser.add_argument(
-        "--experiment_root", type=str, default="/tmp/cutamp-experiments", help="Root directory for experiment logging."
+        "--experiment_root",
+        type=str,
+        default="logs/cutamp-experiments",
+        help="Root directory for experiment logging.",
     )
     parser.add_argument(
         "--experiment_id",
