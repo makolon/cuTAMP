@@ -143,10 +143,10 @@ def approximate_goal_aabb(goal: Obstacle) -> Float[torch.Tensor, "2 3"]:
         upper = vertices.max(dim=0).values
         aabb = torch.stack([lower, upper])
     elif isinstance(goal, Cuboid):
-        # TODO: handle cases when the goal is not axis-aligned. i.e., has rotation
-        goal_xyz = torch.tensor(goal.dims)
-        aabb = torch.stack([-goal_xyz / 2, goal_xyz / 2])
-        aabb = transform_points(aabb, mat4x4)
+        half_extents = 0.5 * torch.tensor(goal.dims, dtype=mat4x4.dtype, device=mat4x4.device)
+        center = mat4x4[:3, 3]
+        extents = mat4x4[:3, :3].abs().matmul(half_extents)
+        aabb = torch.stack([center - extents, center + extents])
     else:
         raise NotImplementedError(f"Goal type {type(goal)} not supported yet.")
 
