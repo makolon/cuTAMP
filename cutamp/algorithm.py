@@ -101,7 +101,7 @@ def get_best_particle(
 
 
 def sample_plan_skeleton(
-    plan_gen,
+    plan_skeleton: PlanSkeleton,
     world: TAMPWorld,
     config: TAMPConfiguration,
     timer: TorchTimer,
@@ -111,10 +111,9 @@ def sample_plan_skeleton(
     particle_initializer: ParticleInitializer,
 ) -> Tuple[Union[dict, None], bool]:
     """
-    Try sampling a plan skeleton (if any remain), then its particles and compute the heuristic.
+    Try sampling particles for a plan skeleton and compute the heuristic.
     Returns the plan_info dict and whether any satisfying particles were found upon initialization.
     """
-    plan_skeleton = next(plan_gen)
     plan_str = [op.name for op in plan_skeleton]
     _log.debug(f"[Plan {plan_count + 1}] Sampled plan {plan_str}")
 
@@ -272,12 +271,17 @@ def setup_cutamp(
             world.warmup_ik_solver(config.num_particles)
 
     # Setup visualizer (doesn't count towards timing)
-    visualizer = (
-        RerunVisualizer(config, q_init, application_id=env.name, recording_id=experiment_id, spawn=config.rr_spawn)
-        if config.enable_visualizer
-        else MockVisualizer()
-    )
-    visualizer.log_tamp_world(world)
+    if config.enable_visualizer:
+        visualizer = RerunVisualizer(
+            config,
+            q_init,
+            application_id=env.name,
+            recording_id=experiment_id,
+            spawn=config.rr_spawn,
+        )
+        visualizer.log_tamp_world(world)
+    else:
+        visualizer = MockVisualizer()
     return exp_logger, visualizer, timer, world
 
 
@@ -312,17 +316,19 @@ def run_cutamp(
         plan_queue: List[dict] = []
         plan_count = 0
         for idx in range(config.num_initial_plans):
-            try:
-                plan_info, has_solution = sample_plan_skeleton(
-                    plan_gen, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
-                )
-                if plan_info is None:
-                    _log.debug("failed subgraph, skipping...")
-                    num_skipped_plans += 1
-                    continue
-            except StopIteration:
+            plan_skeleton = next(plan_gen, None)
+            if plan_skeleton is None:
                 _log.info("Ran out of plans to sample")
                 break
+
+            plan_info, has_solution = sample_plan_skeleton(
+                plan_skeleton, world, config, timer, idx, constraint_checker, cost_reducer, particle_initializer
+            )
+            if plan_info is None:
+                _log.debug("failed subgraph, skipping...")
+                num_skipped_plans += 1
+                continue
+
             plan_queue.append(plan_info)
             if has_solution:
                 found_solution_initially = True

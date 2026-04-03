@@ -13,12 +13,12 @@ Partially modified from:
 - https://github.com/williamshen-nz/rerun-robotics/blob/main/rerun_robotics/rerun_urdf.py
 """
 
-import warnings
 from typing import Union, cast
 
 import numpy as np
 import rerun as rr
 import trimesh
+import open3d as o3d
 
 from curobo.geom.types import Mesh as CuroboMesh, Obstacle
 
@@ -89,15 +89,7 @@ def log_scene(
         if parent:
             # We assume 4x4 homogeneous transforms in column-vector (i.e., last column is translation + 1.0).
             world_from_mesh = node_data[0]
-            rr.log(
-                path,
-                rr.Transform3D(
-                    translation=world_from_mesh[:3, 3],
-                    mat3x3=world_from_mesh[:3, :3],
-                    axis_length=0.0,
-                ),
-                static=static,
-            )
+            rr.log(path, rr.Transform3D(translation=world_from_mesh[:3, 3], mat3x3=world_from_mesh[:3, :3]), static=static)
 
         # Log this node's mesh, if it has one.
         if add_mesh:
@@ -124,18 +116,11 @@ def curobo_to_rerun(entity: CuroboMesh, compute_vertex_normals: bool = True) -> 
     else:
         # The vertices and triangles are already in the mesh
         if not mesh.vertex_normals and compute_vertex_normals:
-            try:
-                # Use open3d to compute vertex normals, so we can get a prettier looking mesh
-                import open3d as o3d
-
-                o3d_mesh = o3d.geometry.TriangleMesh()
-                o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
-                o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
-                o3d_mesh.compute_vertex_normals()
-                vertex_normals = np.asarray(o3d_mesh.vertex_normals)
-            except ImportError:
-                warnings.warn("open3d not installed, setting vertex normals to None")
-                vertex_normals = None
+            o3d_mesh = o3d.geometry.TriangleMesh()
+            o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
+            o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
+            o3d_mesh.compute_vertex_normals()
+            vertex_normals = np.asarray(o3d_mesh.vertex_normals)
         else:
             vertex_normals = mesh.vertex_normals
 
@@ -147,23 +132,15 @@ def curobo_to_rerun(entity: CuroboMesh, compute_vertex_normals: bool = True) -> 
         )
     return rr_mesh
 
-
-def pose_list_to_transform3d(pose: Union[list[float], None], axis_length: Union[float, None] = None) -> rr.Transform3D:
-    if pose is None:
-        return rr.Transform3D()  # unit pose
-
-    # Curobo stores poses as [x y z qw qx qy qz]
-    quat_wxyz = pose[3:]
-    quat_xyzw = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
-    return rr.Transform3D(translation=pose[:3], quaternion=quat_xyzw, axis_length=axis_length)
-
-
 def log_curobo_pose_to_rerun(key: str, obj: Obstacle, static_transform: bool, log_arrows: bool = False):
-    rr.log(
-        key,
-        pose_list_to_transform3d(obj.pose, axis_length=AXIS_LENGTH if log_arrows else None),
-        static=static_transform,
+    transform = rr.Transform3D(
+        translation=obj.pose[:3],
+        quaternion=[obj.pose[4], obj.pose[5], obj.pose[6], obj.pose[3]],
     )
+    if log_arrows:
+        rr.log(key, transform, rr.TransformAxes3D(AXIS_LENGTH), static=static_transform)
+    else:
+        rr.log(key, transform, static=static_transform)
 
 
 def log_curobo_mesh_to_rerun(

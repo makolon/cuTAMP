@@ -19,7 +19,12 @@ from jaxtyping import Float
 from cutamp.config import TAMPConfiguration
 from cutamp.robots import load_rerun_robot
 from cutamp.tamp_world import TAMPWorld
-from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
+from cutamp.utils.rerun_utils import (
+    log_curobo_pose_to_rerun,
+    curobo_to_rerun,
+    log_curobo_mesh_to_rerun,
+    AXIS_LENGTH,
+)
 
 
 class Visualizer(ABC):
@@ -135,10 +140,10 @@ class RerunVisualizer(Visualizer):
         super().__init__(config, q_init)
 
     def set_time_sequence(self, timeline: str, val: int):
-        rr.set_time_sequence(timeline, val)
+        rr.set_time(timeline, sequence=val)
 
     def set_time_seconds(self, timeline: str, val: float):
-        rr.set_time_seconds(timeline, val)
+        rr.set_time(timeline, duration=val)
 
     def set_joint_positions(self, q: Float[Union[torch.Tensor, np.ndarray, list], "d"]):
         if isinstance(q, torch.Tensor):
@@ -183,7 +188,7 @@ class RerunVisualizer(Visualizer):
     def log_mat4x4(self, name: str, mat4x4: Float[Union[torch.Tensor, np.ndarray], "4 4"]):
         if isinstance(mat4x4, torch.Tensor):
             mat4x4 = mat4x4.detach().cpu()
-        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3], axis_length=AXIS_LENGTH))
+        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3]), rr.TransformAxes3D(AXIS_LENGTH))
 
     def log_spheres(self, name: str, spheres: Float[torch.Tensor, "n 4"]):
         if isinstance(spheres, torch.Tensor):
