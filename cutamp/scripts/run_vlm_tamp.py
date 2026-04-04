@@ -57,6 +57,8 @@ def entrypoint():
     parser.add_argument("--disable_visualizer", action="store_true", help="Disable Rerun visualization.")
     parser.add_argument("--viz_interval", type=int, default=10, help="Visualization interval in optimizer steps.")
     parser.add_argument("--disable_robot_mesh", action="store_true", help="Disable robot mesh visualization.")
+    parser.add_argument("--disable_mp4", action="store_true", help="Disable per-attempt mp4 export.")
+    parser.add_argument("--mp4_fps", type=int, default=TAMPConfiguration.rr_mp4_fps, help="FPS for mp4 export.")
     parser.add_argument(
         "--experiment_root",
         type=str,
@@ -162,6 +164,8 @@ def entrypoint():
         enable_visualizer=not args.disable_visualizer,
         opt_viz_interval=args.viz_interval,
         viz_robot_mesh=not args.disable_robot_mesh,
+        rr_export_mp4=not args.disable_mp4,
+        rr_mp4_fps=args.mp4_fps,
         experiment_root=args.experiment_root,
         enable_vlm_tamp=True,
         open_goal=args.open_goal,

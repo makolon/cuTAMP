@@ -66,8 +66,8 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     cabinet_depth_clear = cabinet_outer_dims[1] - 2 * cabinet_wall
     cabinet_proxy = Cuboid(
         name="cabinet",
-        dims=[cabinet_outer_dims[0], cabinet_wall, cabinet_outer_dims[2]],
-        pose=[cabinet_center[0], cabinet_center[1] + cabinet_outer_dims[1] / 2 - cabinet_wall / 2, cabinet_center[2], *unit_quat],
+        dims=[0.01, 0.01, 0.01],
+        pose=[cabinet_center[0], cabinet_center[1], -0.30, *unit_quat],
         color=cabinet_shadow,
     )
     cabinet_left = _panel(
@@ -96,22 +96,22 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     )
     cabinet_interior = Cuboid(
         name="cabinet_interior",
-        dims=[0.17, 0.21, 0.012],
-        pose=[cabinet_center[0], cabinet_center[1], 0.038, *unit_quat],
+        dims=[0.18, 0.23, 0.014],
+        pose=[cabinet_center[0], cabinet_center[1], 0.061, *unit_quat],
         color=interior,
     )
-    cabinet_door_closed_pose = [0.839, -0.420, 0.118, *unit_quat]
-    cabinet_door_open_pose = [0.786, -0.419, 0.118, *unit_quat]
+    cabinet_door_closed_pose = [0.946, -0.250, 0.164, *unit_quat]
+    cabinet_door_open_pose = [0.850, -0.395, 0.164, *unit_quat]
     cabinet_door = Cuboid(
         name="cabinet_door",
-        dims=[0.22, 0.02, 0.26],
+        dims=[0.24, 0.016, 0.26],
         pose=list(cabinet_door_closed_pose),
         color=cabinet_beige,
     )
     cabinet_handle = Cuboid(
         name="cabinet_handle",
-        dims=[0.10, 0.20, 0.08],
-        pose=[0.823, -0.424, 0.152, *unit_quat],
+        dims=[0.02, 0.016, 0.04],
+        pose=[1.000, -0.236, 0.152, *unit_quat],
         color=metal,
     )
 
@@ -121,8 +121,8 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     drawer_depth_clear = drawer_outer_dims[1] - 2 * drawer_wall
     drawer_proxy = Cuboid(
         name="drawer",
-        dims=[drawer_outer_dims[0], drawer_wall, drawer_outer_dims[2]],
-        pose=[drawer_center[0], drawer_center[1] + drawer_outer_dims[1] / 2 - drawer_wall / 2, drawer_center[2], *unit_quat],
+        dims=[0.01, 0.01, 0.01],
+        pose=[drawer_center[0], drawer_center[1], -0.30, *unit_quat],
         color=cabinet_shadow,
     )
     drawer_left = _panel(
@@ -170,19 +170,19 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     mug = Cuboid(
         name="mug",
         dims=[0.055, 0.055, 0.09],
-        pose=[0.926, -0.449, cabinet_floor_z + 0.045 + z_buffer, *unit_quat],
+        pose=[0.990, -0.385, cabinet_floor_z + 0.045 + z_buffer, *unit_quat],
         color=[63, 102, 136],
     )
     bowl = Cuboid(
         name="bowl",
-        dims=[0.10, 0.10, 0.05],
-        pose=[0.952, -0.396, cabinet_floor_z + 0.025 + z_buffer, *unit_quat],
+        dims=[0.09, 0.09, 0.05],
+        pose=[0.912, -0.390, cabinet_floor_z + 0.025 + z_buffer, *unit_quat],
         color=[170, 198, 255],
     )
     plate = Cuboid(
         name="plate",
-        dims=[0.14, 0.14, 0.025],
-        pose=[0.966, -0.344, cabinet_floor_z + 0.0125 + z_buffer, *unit_quat],
+        dims=[0.11, 0.11, 0.022],
+        pose=[0.950, -0.495, cabinet_floor_z + 0.011 + z_buffer, *unit_quat],
         color=[246, 246, 243],
     )
     spoon = Cuboid(

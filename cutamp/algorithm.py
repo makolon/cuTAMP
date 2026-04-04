@@ -32,7 +32,7 @@ from cutamp.retrieval import get_elite_particles, save_retrieval_artifact
 from cutamp.robots import get_q_home, load_robot_container
 from cutamp.rollout import RolloutFunction
 from cutamp.tamp_domain import get_tamp_operators_for_env
-from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
+from cutamp.tamp_world import TAMPWorld, get_tamp_world_initial_collisions
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.common import Particles, mat4x4_to_pose_list
 from cutamp.utils.timer import TorchTimer
@@ -429,7 +429,6 @@ def setup_cutamp(
             coll_n_spheres=config.coll_n_spheres,
             coll_sphere_radius=config.coll_sphere_radius,
         )
-        check_tamp_world_not_in_collision(world)
 
     if config.warmup_ik:
         with timer.time("warmup_ik_solver", log_callback=_log.info):
@@ -437,12 +436,14 @@ def setup_cutamp(
 
     # Setup visualizer (doesn't count towards timing)
     if config.enable_visualizer:
+        rr_recording_path = str(exp_logger.exp_dir / "rerun.rrd")
         visualizer = RerunVisualizer(
             config,
             q_init,
             application_id=env.name,
             recording_id=experiment_id,
             spawn=config.rr_spawn,
+            save_path=rr_recording_path,
         )
         visualizer.log_tamp_world(world)
     else:
@@ -461,6 +462,42 @@ def run_cutamp(
     """Overall cuTAMP algorithm implementation."""
     # Setup all the things and load the world
     exp_logger, visualizer, timer, world = setup_cutamp(env, config, q_init, experiment_id)
+
+    initial_collisions = get_tamp_world_initial_collisions(world)
+    if initial_collisions:
+        sorted_collisions = dict(sorted(initial_collisions.items(), key=lambda item: item[1], reverse=True))
+        _log.warning("Initial state in collision: %s", sorted_collisions)
+        overall_metrics = {
+            "num_optimized_plans": 0,
+            "num_initial_plans": 0,
+            "num_skipped_plans": 0,
+            "num_satisfying_final": 0,
+            "num_particles": config.num_particles,
+            "best_cost": float("inf"),
+            "best_soft_cost": float("inf"),
+            "found_solution": False,
+            "initial_collisions": sorted_collisions,
+        }
+        timer_summaries = timer.get_summaries()
+        exp_logger.log_dict("overall_metrics", overall_metrics)
+        exp_logger.log_dict("timer_metrics", timer_summaries)
+        exp_logger.log_dict("plan_timing_metrics", {"plans": []})
+        exp_logger.log_dict("timing_breakdown", _build_timing_breakdown(timer_summaries, [], overall_metrics))
+        exp_logger.log_dict("multipliers", cost_reducer.cost_config)
+        exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
+        return CutampRunResult(
+            curobo_plan=None,
+            num_satisfying_final=0,
+            found_solution=False,
+            best_particle=None,
+            final_rollout=None,
+            final_env=None,
+            final_q_init=None,
+            overall_metrics=overall_metrics,
+            timer_summaries=timer_summaries,
+            collision_summary=sorted_collisions,
+        )
+
     particle_initializer = ParticleInitializer(world, config)
 
     # Task plan generator

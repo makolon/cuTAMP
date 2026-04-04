@@ -8,6 +8,10 @@
 # its affiliates is strictly prohibited.
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+import shutil
+import subprocess
+import sys
 from typing import Union
 
 import numpy as np
@@ -76,6 +80,16 @@ class Visualizer(ABC):
     def log_scalar(self, name: str, value: float):
         raise NotImplementedError
 
+    @abstractmethod
+    def get_recording_dir(self) -> str | None:
+        """Return directory where visualization artifacts should be written."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_mp4(self, output_path: str, fps: int) -> bool:
+        """Export a video for this recording and return whether it succeeded."""
+        raise NotImplementedError
+
     def log_cost_dict(self, cost_dict: dict):
         for cost_type, cost_info in cost_dict.items():
             for name, vals in cost_info["values"].items():
@@ -123,6 +137,12 @@ class MockVisualizer(Visualizer):
     def log_scalar(self, name: str, value: float):
         pass
 
+    def get_recording_dir(self) -> str | None:
+        return None
+
+    def export_mp4(self, output_path: str, fps: int) -> bool:
+        return False
+
 
 class RerunVisualizer(Visualizer):
     """Wrapper around rerun for easier visualization, and switching in different visualizers."""
@@ -134,8 +154,14 @@ class RerunVisualizer(Visualizer):
         application_id: str,
         recording_id: str,
         spawn: bool,
+        save_path: str | None = None,
     ):
+        self._rrd_path: str | None = save_path
         rr.init(application_id, recording_id=recording_id, spawn=spawn)
+        if save_path is not None:
+            save_target = Path(save_path)
+            save_target.parent.mkdir(parents=True, exist_ok=True)
+            rr.save(str(save_target))
         self.robot = load_rerun_robot(config.robot, load_mesh=config.viz_robot_mesh)
         super().__init__(config, q_init)
 
@@ -197,6 +223,58 @@ class RerunVisualizer(Visualizer):
 
     def log_scalar(self, name: str, value: float):
         rr.log(name, rr.Scalars(value))
+
+    def get_recording_dir(self) -> str | None:
+        if self._rrd_path is None:
+            return None
+        return str(Path(self._rrd_path).parent)
+
+    def export_mp4(self, output_path: str, fps: int) -> bool:
+        if self._rrd_path is None:
+            return False
+
+        rrd_path = Path(self._rrd_path)
+        if not rrd_path.exists():
+            return False
+
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        commands: list[list[str]] = []
+        rerun_exe = shutil.which("rerun")
+        if rerun_exe is not None:
+            commands.append(
+                [
+                    rerun_exe,
+                    "render",
+                    str(rrd_path),
+                    "--output",
+                    str(out_path),
+                    "--fps",
+                    str(fps),
+                ]
+            )
+
+        commands.append(
+            [
+                sys.executable,
+                "-m",
+                "rerun",
+                "render",
+                str(rrd_path),
+                "--output",
+                str(out_path),
+                "--fps",
+                str(fps),
+            ]
+        )
+
+        for cmd in commands:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0 and out_path.exists():
+                return True
+
+        return False
 
 
 def rr_log_tamp_world(world: TAMPWorld, log_spheres: bool = True, log_arrows: bool = True):

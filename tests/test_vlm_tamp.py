@@ -14,11 +14,13 @@ from cutamp.cost_reduction import CostReducer
 from cutamp.envs.book_shelf import load_book_shelf_env
 from cutamp.envs.mini_kitchen import load_mini_kitchen_env
 from cutamp.envs.utils import clone_tamp_environment, reduce_tamp_environment, set_object_pose, set_openable_state
+from cutamp.retrieval import _iter_warmstart_slots
 from cutamp.sim.pybullet_scene import build_pybullet_scene, disconnect_pybullet_scene
 from cutamp.sim.pybullet_sync import sync_pybullet_scene_from_env
 from cutamp.scripts.utils import default_constraint_to_mult, default_constraint_to_tol
 from cutamp.tamp_domain import HandEmpty, In, On, Open, get_initial_state, get_tamp_operators_for_env
 from cutamp.task_planning import task_plan_generator
+from cutamp.utils.common import approximate_goal_aabb
 from cutamp.vlm_tamp import (
     build_scene_abstraction,
     check_subgoal_achieved,
@@ -185,6 +187,54 @@ class VLMTAMPTests(unittest.TestCase):
         set_openable_state(env, "cabinet", True)
         self.assertTrue(check_subgoal_achieved(env, Open.ground("cabinet"), hand_empty=True))
 
+    def test_cabinet_objects_start_supported_by_cabinet_interior(self):
+        env = self.mini_kitchen_env
+        interior = next(obj for obj in env.statics if obj.name == "cabinet_interior")
+        interior_aabb = approximate_goal_aabb(interior)
+        for name in ["mug", "bowl", "plate"]:
+            obj = next(item for item in env.movables if item.name == name)
+            obj_aabb = approximate_goal_aabb(obj)
+            obj_center_xy = obj_aabb.mean(dim=0)[:2]
+            self.assertTrue(bool(torch.all(obj_center_xy >= interior_aabb[0, :2] - 1e-6)))
+            self.assertTrue(bool(torch.all(obj_center_xy <= interior_aabb[1, :2] + 1e-6)))
+            self.assertGreaterEqual(float(obj_aabb[0, 2].item()), float(interior_aabb[1, 2].item()) - 1e-6)
+
+    def test_cabinet_objects_start_clear_of_shell_door_and_handle(self):
+        env = self.mini_kitchen_env
+        statics = {obj.name: obj for obj in env.statics}
+        blockers = [
+            "cabinet_shell_left",
+            "cabinet_shell_right",
+            "cabinet_shell_bottom",
+            "cabinet_shell_top",
+            "cabinet_door",
+            "cabinet_handle",
+        ]
+        for name in ["mug", "bowl", "plate"]:
+            obj = next(item for item in env.movables if item.name == name)
+            obj_aabb = approximate_goal_aabb(obj)
+            for blocker_name in blockers:
+                blocker_aabb = approximate_goal_aabb(statics[blocker_name])
+                overlaps = bool(
+                    torch.all(obj_aabb[0] < blocker_aabb[1]) and torch.all(obj_aabb[1] > blocker_aabb[0])
+                )
+                self.assertFalse(overlaps, f"{name} should not overlap {blocker_name} at reset")
+
+    def test_cabinet_objects_start_separated_from_each_other(self):
+        env = self.mini_kitchen_env
+        cabinet_objects = {
+            obj.name: approximate_goal_aabb(obj)
+            for obj in env.movables
+            if obj.name in {"mug", "bowl", "plate"}
+        }
+        names = list(cabinet_objects)
+        for idx, name_a in enumerate(names):
+            for name_b in names[idx + 1 :]:
+                aabb_a = cabinet_objects[name_a]
+                aabb_b = cabinet_objects[name_b]
+                overlaps = bool(torch.all(aabb_a[0] < aabb_b[1]) and torch.all(aabb_a[1] > aabb_b[0]))
+                self.assertFalse(overlaps, f"{name_a} should not overlap {name_b} at reset")
+
     def test_object_reduction_preserves_containers_and_openables(self):
         reduced = reduce_tamp_environment(self.mini_kitchen_env, movable_names=["mug"])
         self.assertEqual({obj.name for obj in reduced.movables}, {"mug"})
@@ -289,6 +339,28 @@ class VLMTAMPTests(unittest.TestCase):
             )
         )
         self.assertEqual([op.name for op in plan], ["MoveFree", "Open"])
+
+    def test_retrieval_slots_support_open_operator(self):
+        env = self.mini_kitchen_env
+        initial_state = get_initial_state(
+            movables=[obj.name for obj in env.movables],
+            surfaces=[obj.name for obj in env.type_to_objects["Surface"]],
+            containers=[obj.name for obj in env.type_to_objects["Container"]],
+            openables=[obj.name for obj in env.type_to_objects["Openable"]],
+        )
+        initial_state = frozenset(set(initial_state).union(env.initial_atoms))
+        goal_state = frozenset({Open.ground("drawer"), HandEmpty.ground()})
+        plan = next(
+            task_plan_generator(
+                initial_state,
+                goal_state,
+                operators=get_tamp_operators_for_env("mini_kitchen"),
+                max_depth=12,
+            )
+        )
+        slot_keys = {slot["slot_key"] for slot in _iter_warmstart_slots(plan)}
+        self.assertIn("step_001:Open:drawer:open_pose", slot_keys)
+        self.assertIn("step_001:Open:drawer:q", slot_keys)
 
     def test_run_vlm_tamp_reprompts_after_invalid_subgoal_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:

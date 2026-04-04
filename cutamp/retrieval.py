@@ -11,7 +11,7 @@ from cutamp.config import TAMPConfiguration
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.experiment_logger import ExperimentLogger
-from cutamp.tamp_domain import Conf, Grasp, MoveFree, MoveHolding, Pick, Place, Pose, Push, PushStick, Traj
+from cutamp.tamp_domain import Conf, Grasp, MoveFree, MoveHolding, OpenContainerOp, Pick, Place, Pose, Push, PushStick, Traj
 from cutamp.tamp_world import TAMPWorld
 from cutamp.task_planning import PlanSkeleton
 from cutamp.utils.common import (
@@ -158,6 +158,26 @@ def _iter_warmstart_slots(plan_skeleton: PlanSkeleton) -> list[dict[str, str]]:
                     "param_type": Conf,
                     "encoding": "raw",
                     "anchor": surface,
+                }
+            )
+        elif op_name == OpenContainerOp.name:
+            container, pose_name, q = ground_op.values
+            slots.append(
+                {
+                    "slot_key": f"{step_prefix}:{container}:open_pose",
+                    "param_name": pose_name,
+                    "param_type": Pose,
+                    "encoding": "raw",
+                    "anchor": container,
+                }
+            )
+            slots.append(
+                {
+                    "slot_key": f"{step_prefix}:{container}:q",
+                    "param_name": q,
+                    "param_type": Conf,
+                    "encoding": "raw",
+                    "anchor": container,
                 }
             )
         elif op_name == Push.name:

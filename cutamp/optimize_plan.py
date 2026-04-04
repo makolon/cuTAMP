@@ -9,6 +9,7 @@
 
 import logging
 import time
+from pathlib import Path
 from typing import Tuple, TypedDict
 
 import torch
@@ -21,6 +22,7 @@ from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_function import CostFunction
 from cutamp.cost_reduction import CostReducer
 from cutamp.rollout import RolloutFunction
+from cutamp.sim.rollout_video import export_rollout_mp4
 from cutamp.tamp_domain import Conf, Grasp, Pose, Traj
 from cutamp.task_planning import PlanSkeleton
 from cutamp.utils.timer import TorchTimer
@@ -271,6 +273,20 @@ class ParticleOptimizer:
                 obj_pose = rollout["obj_to_pose"][obj.name][best_idx, pose_ts].cpu()
                 visualizer.log_mat4x4(f"world/{obj.name}", obj_pose)
         timer.stop("visualize_rollout")
+
+        if self.config.rr_export_mp4:
+            recording_dir = visualizer.get_recording_dir()
+            if recording_dir is not None:
+                output_path = Path(recording_dir) / "optimization" / f"opt_{self.opt_counter + 1:04d}_rollout.mp4"
+                mp4_ok = export_rollout_mp4(
+                    world=world,
+                    rollout=rollout,
+                    best_idx=int(best_idx.item()),
+                    output_path=output_path,
+                    fps=self.config.rr_mp4_fps,
+                )
+                if not mp4_ok:
+                    _log.warning("Failed to export rollout mp4 to %s", output_path)
 
         self.opt_counter += 1
         return num_satisfying > 0, opt_metrics, time_exceeded

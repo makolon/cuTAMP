@@ -1088,6 +1088,7 @@ def run_vlm_tamp(
                     q_init=current_q_init,
                     planner_fn=planner_fn,
                 )
+
                 blockers = summarize_blockers(result.collision_summary, current_env, exclude=set(relevant_movables))
                 attempt_record = {
                     "subgoal": formal_subgoal.canonical,

@@ -45,10 +45,25 @@ class ExperimentLogger:
         with open(self.exp_dir / "config.yml", "w") as f:
             yaml.dump(config.__dict__, f, sort_keys=False)
 
+    @staticmethod
+    def _dedupe_path(path: Path) -> Path:
+        """Return a unique path by appending a numeric suffix when needed."""
+        if not path.exists():
+            return path
+
+        stem = path.stem
+        suffix = path.suffix
+        parent = path.parent
+        idx = 1
+        candidate = parent / f"{stem}_{idx:03d}{suffix}"
+        while candidate.exists():
+            idx += 1
+            candidate = parent / f"{stem}_{idx:03d}{suffix}"
+        _log.warning("File %s already exists, writing to %s", path, candidate)
+        return candidate
+
     def log_dict(self, name: str, data: dict) -> Path:
-        path = self.exp_dir / f"{name}.json"
-        if path.exists():
-            raise ValueError(f"File {path} already exists")
+        path = self._dedupe_path(self.exp_dir / f"{name}.json")
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save as JSON, YAML is too slow to load
@@ -68,9 +83,7 @@ class ExperimentLogger:
 
     def log_torch(self, name: str, data: dict) -> Path:
         """Save a dictionary of tensors for later warm-start retrieval."""
-        path = self.exp_dir / f"{name}.pt"
-        if path.exists():
-            raise ValueError(f"File {path} already exists")
+        path = self._dedupe_path(self.exp_dir / f"{name}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(data, path)
         _log.info(f"Logged tensor payload {name} to {path}")

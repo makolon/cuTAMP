@@ -96,6 +96,10 @@ class TAMPConfiguration:
     viz_robot_mesh: bool = True
     # Spawn the rerun visualizer
     rr_spawn: bool = True
+    # Export rerun recording to mp4 after each run attempt.
+    rr_export_mp4: bool = True
+    # Frames per second for mp4 export.
+    rr_mp4_fps: int = 30
 
     ## Logging Args
     enable_experiment_logging: bool = True
@@ -255,3 +259,5 @@ def validate_tamp_config(config: TAMPConfiguration):
         raise ValueError(f"world_activation_distance must be non-negative, not {config.world_activation_distance}")
     if config.movable_activation_distance < 0:
         raise ValueError(f"movable_activation_distance must be non-negative, not {config.movable_activation_distance}")
+    if config.rr_mp4_fps <= 0:
+        raise ValueError(f"rr_mp4_fps must be positive, not {config.rr_mp4_fps}")

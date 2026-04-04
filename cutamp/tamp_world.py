@@ -226,8 +226,9 @@ class TAMPWorld:
         return motion_gen
 
 
-def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1e-6):
-    """Check that the initial state of the movable objects are not in collision."""
+def get_tamp_world_initial_collisions(world: TAMPWorld, collision_tol: float = 1e-6) -> dict[str, float]:
+    """Return movable objects that are initially in collision with their collision cost."""
+    collisions: dict[str, float] = {}
     for obj in world.movables:
         # Transform spheres to world frame
         mat4x4 = pose_list_to_mat4x4(obj.pose).to(world.device)
@@ -236,6 +237,15 @@ def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1
 
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
-            raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+            collisions[obj.name] = float(coll_cost.detach().item())
 
     # TODO: catch collisions between spheres for each movable objects here
+    return collisions
+
+
+def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1e-6):
+    """Check that the initial state of the movable objects are not in collision."""
+    collisions = get_tamp_world_initial_collisions(world, collision_tol=collision_tol)
+    if collisions:
+        obj_name, coll_cost = max(collisions.items(), key=lambda item: item[1])
+        raise ValueError(f"Initial state in collision for object '{obj_name}' with cost {coll_cost}")

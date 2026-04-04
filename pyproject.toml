@@ -27,6 +27,8 @@ dependencies = [
     "omegaconf",
     "open3d",
     "pybullet",
+    "imageio",
+    "imageio-ffmpeg",
     "rerun-sdk",
     "roma",
     "tqdm",
