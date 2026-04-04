@@ -20,11 +20,24 @@ from cutamp.costs import sphere_to_sphere_overlap
 from cutamp.samplers import (
     grasp_4dof_sampler,
     grasp_6dof_sampler,
+    open_pose_sampler,
     place_4dof_sampler,
     sample_yaw,
 )
 from cutamp.retrieval import RetrievalWarmStarter
-from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick
+from cutamp.tamp_domain import (
+    MoveFree,
+    MoveHolding,
+    OpenContainerOp,
+    Pick,
+    PickFromContainer,
+    PickFromSurface,
+    Place,
+    PlaceInContainer,
+    PlaceOnSurface,
+    Push,
+    PushStick,
+)
 from cutamp.tamp_world import TAMPWorld
 from cutamp.task_planning import PlanSkeleton
 from cutamp.utils.common import (
@@ -55,6 +68,7 @@ class ParticleInitializer:
         # Sampler caching
         self.pick_cache = {}
         self.place_cache = {}
+        self.open_cache = {}
         self.push_button_cache = {}
         self.push_stick_cache = {}
         self.failed_push = set()
@@ -162,9 +176,55 @@ class ParticleInitializer:
                 deferred_params.add(q_end)
                 log_debug(f"{header}. Deferred {q_end}")
 
+            # Open
+            elif op_name == OpenContainerOp.name:
+                container, open_pose, q = params
+                if not world.has_object(container):
+                    raise ValueError(f"{container=} not found in world")
+                if open_pose in particles:
+                    raise ValueError(f"{open_pose=} shouldn't already be bound")
+                if q in particles:
+                    raise ValueError(f"{q=} shouldn't already be bound")
+
+                if config.cache_subgraphs and container in self.open_cache:
+                    particles[open_pose] = self.open_cache[container]["sampled_open"].clone()
+                    particles[q] = self._cache_q(self.open_cache[container])
+                    deferred_params.remove(q)
+                    success_count = self._cache_success_count(self.open_cache[container], num_particles)
+                    log_debug(
+                        f"{header}. Using cached open poses for {container}. {success_count}/{num_particles} success"
+                    )
+                    continue
+
+                handle_name = world.get_openable_metadata(container)["handle"]
+                handle = world.get_object(handle_name)
+                sampled_open = open_pose_sampler(num_particles, handle)
+                particles[open_pose] = sampled_open
+                world_from_open = action_6dof_to_mat4x4(sampled_open)
+                world_from_ee = world_from_open @ world.tool_from_ee
+                world_from_ee = Pose.from_matrix(world_from_ee)
+                ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)
+                log_debug(
+                    f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                )
+                particles[q] = ik_result.solution[:, 0]
+                deferred_params.remove(q)
+                if config.cache_subgraphs:
+                    self.open_cache[container] = {
+                        "sampled_open": particles[open_pose].clone(),
+                        "q": particles[q].clone(),
+                        "ik_result": ik_result,
+                        "success_count": int(ik_result.success.sum().item()),
+                    }
+
             # Pick
-            elif op_name == Pick.name:
-                obj, grasp, q = params
+            elif op_name in {Pick.name, PickFromSurface.name, PickFromContainer.name}:
+                if op_name == PickFromSurface.name:
+                    obj, _surface, grasp, q = params
+                elif op_name == PickFromContainer.name:
+                    obj, _container, grasp, q = params
+                else:
+                    obj, grasp, q = params
                 if not world.has_object(obj):
                     raise ValueError(f"{obj=} not found in world")
                 if grasp in particles:
@@ -250,7 +310,7 @@ class ParticleInitializer:
                     }
 
             # Place
-            elif op_name == Place.name:
+            elif op_name in {Place.name, PlaceOnSurface.name, PlaceInContainer.name}:
                 obj, grasp, placement, surface, q = params
                 if not world.has_object(obj):
                     raise ValueError(f"{obj=} not found in world")
@@ -279,19 +339,20 @@ class ParticleInitializer:
                         }
                     continue
 
-                if (obj, surface) in self.place_cache:
+                place_cache_key = (obj, surface)
+                if place_cache_key in self.place_cache:
                     # need to make sure the grasps match what is cached
                     actual_grasp = particles[grasp]
-                    cached_grasp = self.place_cache[(obj, surface)]["grasp"]
+                    cached_grasp = self.place_cache[place_cache_key]["grasp"]
                     if not (actual_grasp == cached_grasp).all():
                         raise RuntimeError(f"Grasps don't match for {obj} on {surface}")
 
                     # important, we need to clone here
-                    sampled_placements = self.place_cache[(obj, surface)]["sampled_placements"].clone()
+                    sampled_placements = self.place_cache[place_cache_key]["sampled_placements"].clone()
                     particles[placement] = sampled_placements
-                    particles[q] = self._cache_q(self.place_cache[(obj, surface)])
+                    particles[q] = self._cache_q(self.place_cache[place_cache_key])
                     deferred_params.remove(q)
-                    success_count = self._cache_success_count(self.place_cache[(obj, surface)], num_particles)
+                    success_count = self._cache_success_count(self.place_cache[place_cache_key], num_particles)
                     log_debug(
                         f"{header}. Using cached placement poses for {obj}. {success_count}/{num_particles} success"
                     )
@@ -308,7 +369,11 @@ class ParticleInitializer:
                     xyz = sample_between_bounds(num_particles * 4, aabb)
                     sampled_placements = torch.cat([xyz, yaw.unsqueeze(-1)], dim=1)
                 else:
-                    surface_curobo = world.get_object(surface)
+                    surface_curobo = (
+                        world.get_container_interior(surface)
+                        if op_name == PlaceInContainer.name
+                        else world.get_object(surface)
+                    )
                     sampled_placements = place_4dof_sampler(num_particles * 4, obj_curobo, obj_spheres, surface_curobo)
 
                 # Select the placements that are not in collision with the object
@@ -350,7 +415,7 @@ class ParticleInitializer:
 
                 # Store in cache
                 if config.cache_subgraphs:
-                    self.place_cache[(obj, surface)] = {
+                    self.place_cache[place_cache_key] = {
                         "sampled_placements": particles[placement].clone(),
                         "q": particles[q].clone(),
                         "ik_result": ik_result,

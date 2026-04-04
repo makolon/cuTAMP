@@ -23,8 +23,10 @@ dependencies = [
     # Core
     "einops",
     "jaxtyping",
+    "numpy",
     "omegaconf",
     "open3d",
+    "pybullet",
     "rerun-sdk",
     "roma",
     "tqdm",
@@ -55,6 +57,7 @@ cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
 cutamp-collect-retrieval = "cutamp.scripts.collect_retrieval_data:entrypoint"
 cutamp-benchmark-retrieval = "cutamp.scripts.benchmark_retrieval:entrypoint"
 cutamp-vlm-demo = "cutamp.scripts.run_vlm_tamp:entrypoint"
+cutamp-benchmark-vlm = "cutamp.scripts.benchmark_vlm:entrypoint"
 
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }

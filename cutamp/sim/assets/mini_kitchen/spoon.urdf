@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<robot name="spoon">
+  <link name="body">
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <box size="0.10 0.018 0.01"/>
+      </geometry>
+      <material name="metal_body">
+        <color rgba="0.70 0.70 0.70 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="head_joint" type="fixed">
+    <parent link="body"/>
+    <child link="head"/>
+    <origin xyz="0.05 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="head">
+    <visual>
+      <geometry>
+        <box size="0.03 0.03 0.01"/>
+      </geometry>
+      <material name="metal_head">
+        <color rgba="0.76 0.76 0.76 1.0"/>
+      </material>
+    </visual>
+  </link>
+</robot>

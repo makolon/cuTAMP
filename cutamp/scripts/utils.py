@@ -13,7 +13,15 @@ from typing import Optional
 
 import torch
 
-from cutamp.task_planning.constraints import KinematicConstraint, StablePlacement, Collision, Motion, ValidPush
+from cutamp.task_planning.constraints import (
+    Collision,
+    ContainedIn,
+    KinematicConstraint,
+    Motion,
+    StablePlacement,
+    ValidOpen,
+    ValidPush,
+)
 from cutamp.task_planning.costs import TrajectoryLength
 
 
@@ -22,6 +30,8 @@ _log = logging.getLogger(__name__)
 default_constraint_to_mult = {
     KinematicConstraint.type: {"pos_err": 1.0, "rot_err": 5.0},
     StablePlacement.type: {"goal_support": 2.0},
+    ContainedIn.type: {"default": 2.0},
+    ValidOpen.type: {"dist_from_handle": 1.0},
     TrajectoryLength.type: {"traj_length": 1e-3},
     "soft": {
         "dist_from_origin": 5e-1,
@@ -83,6 +93,8 @@ default_constraint_to_tol = {
         "stove_in_xy": 1e-3,
         "stove_support": 1e-2,
     },
+    ContainedIn.type: {"default": 1e-2},
+    ValidOpen.type: {"dist_from_handle": 1e-2},
     ValidPush.type: {"dist_from_button": 0.0},
 }
 

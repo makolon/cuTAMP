@@ -17,6 +17,7 @@ from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment
 from cutamp.envs.book_shelf import load_book_shelf_env
+from cutamp.envs.mini_kitchen import load_mini_kitchen_env
 from cutamp.envs.stick_button import load_stick_button_env
 from cutamp.envs.tetris import load_tetris_env
 from cutamp.envs.utils import get_env_dir, load_env
@@ -36,6 +37,8 @@ def load_demo_env(name: str, tetris_random_yaws: bool = False) -> TAMPEnvironmen
         env = load_tetris_env(num_blocks, buffer_multiplier=1.0, random_yaws=tetris_random_yaws)
     elif name == "book_shelf":
         env = load_book_shelf_env()
+    elif name == "mini_kitchen":
+        env = load_mini_kitchen_env()
     elif name == "stick_button":
         env = load_stick_button_env()
     elif name == "blocks":
@@ -77,7 +80,17 @@ def entrypoint():
         "--env",
         help="Environment name to run",
         default="tetris_3",
-        choices=["tetris_1", "tetris_2", "tetris_3", "tetris_5", "book_shelf", "stick_button", "blocks", "unpack"],
+        choices=[
+            "tetris_1",
+            "tetris_2",
+            "tetris_3",
+            "tetris_5",
+            "book_shelf",
+            "mini_kitchen",
+            "stick_button",
+            "blocks",
+            "unpack",
+        ],
     )
     parser.add_argument(
         "-n", "--num_particles", type=int, default=1024, help="Number of particles to use (i.e. batch size)"
@@ -134,6 +147,12 @@ def entrypoint():
     )
     parser.add_argument(
         "--num_initial_plans", type=int, default=30, help="Number of initial plans to sample with task planner."
+    )
+    parser.add_argument(
+        "--task_plan_max_depth",
+        type=int,
+        default=TAMPConfiguration.task_plan_max_depth,
+        help="Maximum symbolic search depth for a single task-planning subproblem.",
     )
     parser.add_argument("--cache_subgraphs", action="store_true", help="Whether to cache subgraph samples for reuse.")
     parser.add_argument(
@@ -251,6 +270,7 @@ def entrypoint():
         optimize_soft_costs=args.optimize_soft_costs,
         soft_cost=args.soft_cost,
         num_initial_plans=args.num_initial_plans,
+        task_plan_max_depth=args.task_plan_max_depth,
         cache_subgraphs=args.cache_subgraphs,
         curobo_plan=args.motion_plan,
         enable_visualizer=not args.disable_visualizer,

@@ -11,7 +11,7 @@
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, List, Union, Optional, Tuple
 from unittest.mock import Mock
@@ -23,7 +23,7 @@ from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_function import CostFunction
 from cutamp.cost_reduction import CostReducer
-from cutamp.envs.utils import TAMPEnvironment, clone_tamp_environment, set_object_pose
+from cutamp.envs.utils import TAMPEnvironment, clone_tamp_environment, set_object_pose, set_openable_state
 from cutamp.experiment_logger import ExperimentLogger
 from cutamp.motion_solver import solve_curobo
 from cutamp.optimize_plan import ParticleOptimizer
@@ -31,7 +31,7 @@ from cutamp.particle_initialization import ParticleInitializer
 from cutamp.retrieval import get_elite_particles, save_retrieval_artifact
 from cutamp.robots import get_q_home, load_robot_container
 from cutamp.rollout import RolloutFunction
-from cutamp.tamp_domain import all_tamp_operators
+from cutamp.tamp_domain import get_tamp_operators_for_env
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.common import Particles, mat4x4_to_pose_list
@@ -50,10 +50,11 @@ class CutampRunResult:
     final_rollout: Optional[dict]
     final_env: Optional[TAMPEnvironment]
     final_q_init: Optional[torch.Tensor]
-    final_plan_skeleton: Optional[list[str]]
-    overall_metrics: dict
-    timer_summaries: dict
-    collision_summary: dict[str, float]
+    final_openables_state: dict[str, bool] = field(default_factory=dict)
+    final_plan_skeleton: Optional[list[str]] = None
+    overall_metrics: dict = field(default_factory=dict)
+    timer_summaries: dict = field(default_factory=dict)
+    collision_summary: dict[str, float] = field(default_factory=dict)
 
 
 def _sync_perf_counter() -> float:
@@ -93,11 +94,28 @@ def _get_plan_collision_summary(plan_info: Optional[dict]) -> dict[str, float]:
     return _summarize_collision_costs(cost_dict)
 
 
-def _build_final_environment(world: TAMPWorld, final_rollout: dict) -> TAMPEnvironment:
+def _extract_final_openables_state(world: TAMPWorld, plan_skeleton: PlanSkeleton) -> dict[str, bool]:
+    openable_states = {
+        name: bool(info["is_open"]) for name, info in world.env.metadata.get("openables", {}).items()
+    }
+    for ground_op in plan_skeleton:
+        if ground_op.operator.name == "Open":
+            openable_states[ground_op.values[0]] = True
+    return openable_states
+
+
+def _build_final_environment(
+    world: TAMPWorld,
+    final_rollout: dict,
+    final_openables_state: Optional[dict[str, bool]] = None,
+) -> TAMPEnvironment:
     final_env = clone_tamp_environment(world.env)
     for obj_name, poses in final_rollout["obj_to_pose"].items():
         last_pose = poses[0, -1].detach().cpu()
         set_object_pose(final_env, obj_name, mat4x4_to_pose_list(last_pose))
+    if final_openables_state is not None:
+        for openable, is_open in final_openables_state.items():
+            set_openable_state(final_env, openable, is_open)
     return final_env
 
 
@@ -452,8 +470,9 @@ def run_cutamp(
         plan_gen = task_plan_generator(
             world.initial_state,
             world.goal_state,
-            operators=all_tamp_operators,
+            operators=get_tamp_operators_for_env(env.name),
             explored_state_check=config.explored_state_check,
+            max_depth=config.task_plan_max_depth,
         )
 
     # Sample initial plans and particles
@@ -525,6 +544,7 @@ def run_cutamp(
     final_rollout = None
     final_env = None
     final_q_init = None
+    final_openables_state = {}
     failure_plan_info = None
     particle_optimizer = ParticleOptimizer(config, cost_reducer, constraint_checker)
     timer.start("first_solution")
@@ -699,7 +719,8 @@ def run_cutamp(
                 best_particle = get_best_particle(plan_info, config, constraint_checker, cost_reducer)
             final_best_particle = best_particle
             final_rollout = plan_info["rollout_fn"]({k: v[None].detach().clone() for k, v in best_particle.items()})
-            final_env = _build_final_environment(world, final_rollout)
+            final_openables_state = _extract_final_openables_state(world, plan_skeleton)
+            final_env = _build_final_environment(world, final_rollout, final_openables_state)
             final_q_init = final_rollout["confs"][0, -1].detach().clone()
             if config.curobo_plan:
                 curobo_plan = solve_curobo(
@@ -761,6 +782,7 @@ def run_cutamp(
         final_rollout=final_rollout,
         final_env=final_env,
         final_q_init=final_q_init,
+        final_openables_state=final_openables_state,
         final_plan_skeleton=overall_metrics.get("final_plan_skeleton"),
         overall_metrics=overall_metrics,
         timer_summaries=timer_summaries,

@@ -52,9 +52,19 @@ class StablePlacement(Constraint):
         super().__init__(obj, grasp, placement, surface)
 
 
+class ContainedIn(Constraint):
+    def __init__(self, obj, grasp, placement, container):
+        super().__init__(obj, grasp, placement, container)
+
+
 class ValidPush(Constraint):
     def __init__(self, button, push_pose):
         super().__init__(button, push_pose)
+
+
+class ValidOpen(Constraint):
+    def __init__(self, container, open_pose):
+        super().__init__(container, open_pose)
 
 
 class ValidPushStick(Constraint):

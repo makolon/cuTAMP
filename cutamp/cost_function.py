@@ -28,9 +28,11 @@ from cutamp.task_planning.constraints import (
     CollisionFreeGrasp,
     CollisionFreeHolding,
     CollisionFreePlacement,
+    ContainedIn,
     KinematicConstraint,
     Motion,
     StablePlacement,
+    ValidOpen,
     ValidPush,
     ValidPushStick,
 )
@@ -58,6 +60,8 @@ class CostFunction:
         self.kinematic_constraints = []
         self.motion_constraints = []
         self.stable_placement_constraints = []
+        self.contained_in_constraints = []
+        self.valid_open_constraints = []
         self.valid_push_constraints = []
         self.valid_push_stick_constraints = []
         self.traj_length_costs = []
@@ -70,6 +74,8 @@ class CostFunction:
             CollisionFreeGrasp.type: self.cfree_constraints,
             CollisionFreePlacement.type: self.cfree_constraints,
             StablePlacement.type: self.stable_placement_constraints,
+            ContainedIn.type: self.contained_in_constraints,
+            ValidOpen.type: self.valid_open_constraints,
             ValidPush.type: self.valid_push_constraints,
             ValidPushStick.type: self.valid_push_stick_constraints,
             TrajectoryLength.type: self.traj_length_costs,
@@ -125,6 +131,27 @@ class CostFunction:
             surface_z = aabb[1, 2]
             target_z = surface_z + world.collision_activation_distance + 2e-3  # add some buffer
             self.surface_to_target_z[surface] = target_z
+
+        self.container_to_aabb = {}
+        self.container_to_objs = defaultdict(list)
+        for con in self.contained_in_constraints:
+            obj, _, _, container = con.params
+            self.container_to_objs[container].append(obj)
+            if container in self.container_to_aabb:
+                continue
+            interior = world.get_container_interior(container)
+            self.container_to_aabb[container] = world.get_aabb(interior)
+
+        self.openable_to_action = {}
+        self.openable_handle_aabbs = []
+        for con in self.valid_open_constraints:
+            container, action = con.params
+            if container in self.openable_to_action:
+                raise NotImplementedError(f"We only support opening a container once right now: {container}")
+            handle_name = world.get_openable_metadata(container)["handle"]
+            self.openable_to_action[container] = action
+            self.openable_handle_aabbs.append(world.get_aabb(handle_name).clone())
+        self.openable_handle_aabbs = torch.stack(self.openable_handle_aabbs) if self.openable_handle_aabbs else None
 
         # Store the button AABBs for ValidPush
         self.button_to_action = {}
@@ -335,6 +362,57 @@ class CostFunction:
         }
         return stable_placement_cost
 
+    def contained_in_costs(
+        self, rollout: Rollout, obj_to_spheres: Dict[str, Float[torch.Tensor, "b t n 4"]]
+    ) -> Union[dict, None]:
+        """Containment constraints for placements into container interiors."""
+        if not self.contained_in_constraints:
+            return None
+
+        container_values = {}
+        for container, objs in self.container_to_objs.items():
+            per_object_costs = []
+            aabb = self.container_to_aabb[container]
+            lower_base = aabb[0]
+            upper_base = aabb[1]
+            for con in self.contained_in_constraints:
+                obj, _, placement, con_container = con.params
+                if con_container != container:
+                    continue
+                pose_ts = rollout["action_to_pose_ts"][placement]
+                spheres = obj_to_spheres[obj][:, pose_ts]
+                radii = spheres[..., 3:4]
+                lower = lower_base[None, None] + radii
+                upper = upper_base[None, None] - radii
+                center_cost = dist_from_bounds_jit(spheres[..., :3], lower, upper).sum(dim=-1)
+                per_object_costs.append(center_cost)
+
+            if per_object_costs:
+                container_values[f"{container}_interior"] = torch.stack(per_object_costs, dim=1)
+
+        return {
+            "type": "constraint",
+            "constraints": self.contained_in_constraints,
+            "values": container_values,
+        }
+
+    def valid_open_costs(self, rollout: Rollout) -> Union[dict, None]:
+        """Open constraints that require the tool pose to reach the handle region."""
+        if not self.valid_open_constraints:
+            return None
+
+        ts_idxs = []
+        for container, action in self.openable_to_action.items():
+            ts_idxs.append(rollout["action_to_ts"][action])
+        tool_poses = rollout["world_from_tool_desired"][:, ts_idxs]
+        tool_xyz = tool_poses[:, :, :3, 3]
+        dist_from_handle = dist_from_bounds_jit(tool_xyz, self.openable_handle_aabbs[:, 0], self.openable_handle_aabbs[:, 1])
+        return {
+            "type": "constraint",
+            "constraints": self.valid_open_constraints,
+            "values": {"dist_from_handle": dist_from_handle},
+        }
+
     def trajectory_costs(self, rollout: Rollout) -> dict:
         """Trajectory costs, just joint space distance between configurations for now."""
         traj_cost = {
@@ -350,17 +428,26 @@ class CostFunction:
         robot_spheres = rollout["robot_spheres"]
         coll_values = {"robot_to_world": self.world.collision_fn(robot_spheres)}
 
-        # Collision between movables and world
-        all_movable_spheres = torch.cat(list(obj_to_spheres.values()), dim=2)
-        coll_values["movable_to_world"] = self.world.collision_fn(all_movable_spheres)
+        if obj_to_spheres:
+            # Collision between movables and world
+            all_movable_spheres = torch.cat(list(obj_to_spheres.values()), dim=2)
+            coll_values["movable_to_world"] = self.world.collision_fn(all_movable_spheres)
 
-        # Collision between robot and movables, need to expand poses to full timesteps
-        all_pose_ts = list(rollout["ts_to_pose_ts"].values())
-        coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
-            robot_spheres,
-            all_movable_spheres[:, all_pose_ts],
-            activation_distance=self.config.gripper_activation_distance,
-        )
+            # Collision between robot and movables, need to expand poses to full timesteps
+            all_pose_ts = list(rollout["ts_to_pose_ts"].values())
+            coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
+                robot_spheres,
+                all_movable_spheres[:, all_pose_ts],
+                activation_distance=self.config.gripper_activation_distance,
+            )
+        else:
+            zero_template = torch.zeros(
+                robot_spheres.shape[:2],
+                dtype=robot_spheres.dtype,
+                device=robot_spheres.device,
+            )
+            coll_values["movable_to_world"] = zero_template
+            coll_values["robot_to_movables"] = zero_template
 
         # TODO: this is slow and a bottleneck, could consider using curobo's fast sphere-to-sphere kernel
         # Collision between movable objects
@@ -454,9 +541,17 @@ class CostFunction:
         valid_push_cost = self.valid_push_costs(rollout, obj_to_spheres)
         add_cost(ValidPush.type, valid_push_cost)
 
+        # Valid Open constraints
+        valid_open_cost = self.valid_open_costs(rollout)
+        add_cost(ValidOpen.type, valid_open_cost)
+
         # Stable placement cost
         stable_placement_cost = self.stable_placement_costs(rollout, obj_to_spheres)
         add_cost(StablePlacement.type, stable_placement_cost)
+
+        # Containment cost
+        contained_in_cost = self.contained_in_costs(rollout, obj_to_spheres)
+        add_cost(ContainedIn.type, contained_in_cost)
 
         # Valid motions don't exceed joint limits
         motion_cost = self.motion_costs(rollout)

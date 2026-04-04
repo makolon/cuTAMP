@@ -1,0 +1,23 @@
+<?xml version="1.0" ?>
+<robot name="cutamp_bowl">
+  <link name="base"/>
+  <link name="body">
+    <visual>
+      <origin xyz="-0.000885 -0.0001355 -0.001921"/>
+      <geometry>
+        <mesh filename="Bowl_8e840ba109f252534c6955b188e290e0_S.obj"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.000885 -0.0001355 -0.001921"/>
+      <geometry>
+        <mesh filename="collision.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="body_fixed" type="fixed">
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <child link="body"/>
+    <parent link="base"/>
+  </joint>
+</robot>

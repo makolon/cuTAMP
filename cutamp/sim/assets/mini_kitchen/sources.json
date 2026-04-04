@@ -1,0 +1,69 @@
+{
+  "bundle": "mini_kitchen",
+  "reference_repo": "https://github.com/Learning-and-Intelligent-Systems/kitchen-worlds",
+  "reference_assets_repo": "https://github.com/zt-yang/kitchen-models",
+  "reference_paper": "https://arxiv.org/abs/2410.02193",
+  "description": "A mixed asset bundle for cuTAMP mini_kitchen rendering: hand-authored support/object proxies plus a kitchen-worlds-aligned articulated counter scene adapted from kitchen-models.",
+  "assets": [
+    {
+      "name": "kitchen_worlds_counter/counter/urdf/kitchen_part_right_gen_convex.urdf",
+      "origin": "adapted from zt-yang/kitchen-models counter asset used by kitchen-worlds",
+      "notes": "Primary articulated kitchen scene for PyBullet RGB rendering, including drawers, cabinet doors, stove, walls, and countertop geometry."
+    },
+    {
+      "name": "kitchen_worlds_counter/counter/meshes/obj/*",
+      "origin": "adapted mesh subset from zt-yang/kitchen-models counter asset",
+      "notes": "Only the OBJ and MTL files referenced by kitchen_part_right_gen_convex.urdf are included."
+    },
+    {
+      "name": "kitchen_models/Drinks/GreyMug/*",
+      "origin": "adapted from zt-yang/kitchen-models Drinks/GreyMug",
+      "notes": "Grey mug mesh reused with a cuTAMP-local URDF wrapper so it can be rendered cleanly in PyBullet."
+    },
+    {
+      "name": "kitchen_models/Bowl/0000/*",
+      "origin": "adapted from zt-yang/kitchen-models Bowl/0000",
+      "notes": "Bowl mesh and its original mobility URDF are used for the mini_kitchen bowl visual."
+    },
+    {
+      "name": "kitchen_models/Plate/SquarePlate/*",
+      "origin": "adapted from zt-yang/kitchen-models Plate/SquarePlate",
+      "notes": "Square plate mesh and texture used for the mini_kitchen plate visual."
+    },
+    {
+      "name": "big_table.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Large support plane used as the floor/support context under the kitchen scene."
+    },
+    {
+      "name": "table.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Secondary table used as a target support surface for long-horizon placement tasks."
+    },
+    {
+      "name": "mug.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Legacy mug proxy kept only for debug render paths."
+    },
+    {
+      "name": "bowl.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Legacy bowl proxy kept only for debug render paths."
+    },
+    {
+      "name": "plate.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Legacy plate proxy kept only for debug render paths."
+    },
+    {
+      "name": "spoon.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Simple spoon visual proxy."
+    },
+    {
+      "name": "fork.urdf",
+      "origin": "hand-authored in cuTAMP",
+      "notes": "Simple fork visual proxy."
+    }
+  ]
+}

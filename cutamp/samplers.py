@@ -175,3 +175,30 @@ def place_4dof_sampler(
     yaw = sample_yaw(num_samples, None, obj.tensor_args.device)
     place_4dof = torch.cat([xyz_surface, yaw.unsqueeze(-1)], dim=1)
     return place_4dof
+
+
+def open_pose_sampler(num_samples: int, handle: Obstacle) -> Place6DOF:
+    """Sample 6-DOF tool poses around a handle region in world frame."""
+    handle_aabb = approximate_goal_aabb(handle).to(handle.tensor_args.device)
+    xyz = torch.rand(num_samples, 3, device=handle.tensor_args.device)
+    xyz = handle_aabb[0] + xyz * (handle_aabb[1] - handle_aabb[0])
+    orientation_bank = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, torch.pi / 2],
+            [0.0, 0.0, -torch.pi / 2],
+            [0.0, 0.0, torch.pi],
+            [torch.pi / 2, 0.0, 0.0],
+            [torch.pi / 2, 0.0, torch.pi / 2],
+            [torch.pi / 2, 0.0, -torch.pi / 2],
+            [torch.pi / 2, 0.0, torch.pi],
+            [-torch.pi / 2, 0.0, 0.0],
+            [-torch.pi / 2, 0.0, torch.pi / 2],
+            [-torch.pi / 2, 0.0, -torch.pi / 2],
+            [-torch.pi / 2, 0.0, torch.pi],
+        ],
+        device=handle.tensor_args.device,
+    )
+    orientation_idx = torch.randint(0, orientation_bank.shape[0], (num_samples,), device=handle.tensor_args.device)
+    rpy = orientation_bank[orientation_idx]
+    return torch.cat([xyz, rpy], dim=1)

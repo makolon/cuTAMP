@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<robot name="table">
+  <link name="top">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.58 0.74 0.02"/>
+      </geometry>
+      <material name="wood_light">
+        <color rgba="0.89 0.77 0.60 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="leg_front_left_joint" type="fixed">
+    <parent link="top"/>
+    <child link="leg_front_left"/>
+    <origin xyz="0.24 0.30 -0.17" rpy="0 0 0"/>
+  </joint>
+  <link name="leg_front_left">
+    <visual>
+      <geometry>
+        <box size="0.04 0.04 0.32"/>
+      </geometry>
+      <material name="wood_dark">
+        <color rgba="0.73 0.57 0.40 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="leg_front_right_joint" type="fixed">
+    <parent link="top"/>
+    <child link="leg_front_right"/>
+    <origin xyz="-0.24 0.30 -0.17" rpy="0 0 0"/>
+  </joint>
+  <link name="leg_front_right">
+    <visual>
+      <geometry>
+        <box size="0.04 0.04 0.32"/>
+      </geometry>
+      <material name="wood_dark">
+        <color rgba="0.73 0.57 0.40 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="leg_back_left_joint" type="fixed">
+    <parent link="top"/>
+    <child link="leg_back_left"/>
+    <origin xyz="0.24 -0.30 -0.17" rpy="0 0 0"/>
+  </joint>
+  <link name="leg_back_left">
+    <visual>
+      <geometry>
+        <box size="0.04 0.04 0.32"/>
+      </geometry>
+      <material name="wood_dark">
+        <color rgba="0.73 0.57 0.40 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="leg_back_right_joint" type="fixed">
+    <parent link="top"/>
+    <child link="leg_back_right"/>
+    <origin xyz="-0.24 -0.30 -0.17" rpy="0 0 0"/>
+  </joint>
+  <link name="leg_back_right">
+    <visual>
+      <geometry>
+        <box size="0.04 0.04 0.32"/>
+      </geometry>
+      <material name="wood_dark">
+        <color rgba="0.73 0.57 0.40 1.0"/>
+      </material>
+    </visual>
+  </link>
+</robot>

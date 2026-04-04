@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<robot name="mug">
+  <link name="body">
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <cylinder radius="0.028" length="0.09"/>
+      </geometry>
+      <material name="mug_body">
+        <color rgba="0.25 0.40 0.53 1.0"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="handle_joint" type="fixed">
+    <parent link="body"/>
+    <child link="handle"/>
+    <origin xyz="0.038 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="handle">
+    <visual>
+      <geometry>
+        <box size="0.012 0.038 0.05"/>
+      </geometry>
+      <material name="mug_handle">
+        <color rgba="0.25 0.40 0.53 1.0"/>
+      </material>
+    </visual>
+  </link>
+</robot>

@@ -14,7 +14,20 @@ from jaxtyping import Float
 
 from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
 from cutamp.config import TAMPConfiguration
-from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick, Conf
+from cutamp.tamp_domain import (
+    Conf,
+    MoveFree,
+    MoveHolding,
+    OpenContainerOp,
+    Pick,
+    PickFromContainer,
+    PickFromSurface,
+    Place,
+    PlaceInContainer,
+    PlaceOnSurface,
+    Push,
+    PushStick,
+)
 from cutamp.tamp_world import (
     TAMPWorld,
 )
@@ -139,8 +152,13 @@ class RolloutFunction:
                 continue
 
             # Pick
-            elif op_name == Pick.name:
-                obj_name, grasp_name, _ = ground_op.values
+            elif op_name in {Pick.name, PickFromSurface.name, PickFromContainer.name}:
+                if op_name == PickFromSurface.name:
+                    obj_name, _surface_name, grasp_name, _ = ground_op.values
+                elif op_name == PickFromContainer.name:
+                    obj_name, _container_name, grasp_name, _ = ground_op.values
+                else:
+                    obj_name, grasp_name, _ = ground_op.values
                 # Grasp is in object frame
                 obj_from_grasp = get_grasp_mat4x4(grasp_name)
 
@@ -155,7 +173,7 @@ class RolloutFunction:
                 action_to_pose_ts[grasp_name] = pose_ts
 
             # Place
-            elif op_name == Place.name:
+            elif op_name in {Place.name, PlaceOnSurface.name, PlaceInContainer.name}:
                 obj_name, grasp_name, place_name, _, _ = ground_op.values
 
                 # Place is desired object pose in world frame
@@ -180,6 +198,18 @@ class RolloutFunction:
                 action_to_ts[place_name] = ts
                 action_to_pose_ts[place_name] = pose_ts
                 ts_to_pose_ts[ts] = pose_ts
+
+            # Open
+            elif op_name == OpenContainerOp.name:
+                _container_name, pose_name, _ = ground_op.values
+                open_pose = particles[pose_name]
+                world_from_open = action_6dof_to_mat4x4(open_pose)
+
+                world_from_tool_desired.append(world_from_open)
+                gripper_close.append(False)
+                action_params.append(pose_name)
+                action_to_ts[pose_name] = ts
+                action_to_pose_ts[pose_name] = pose_ts
 
             # Push
             elif op_name == Push.name:

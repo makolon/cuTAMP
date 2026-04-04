@@ -17,22 +17,29 @@ from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs.book_shelf import load_book_shelf_env
+from cutamp.envs.mini_kitchen import load_mini_kitchen_env
 from cutamp.scripts.utils import default_constraint_to_mult, default_constraint_to_tol, set_random_seed, setup_logging
 from cutamp.vlm_tamp import run_vlm_tamp
 
 
 def entrypoint():
     parser = argparse.ArgumentParser(
-        description="Run the VLM-guided cuTAMP pipeline on the book_shelf task.",
+        description="Run the VLM-guided cuTAMP pipeline on supported tasks.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--env", default="book_shelf", choices=["book_shelf"], help="Environment to run.")
+    parser.add_argument("--env", default="book_shelf", choices=["book_shelf", "mini_kitchen"], help="Environment to run.")
     parser.add_argument("--open_goal", required=True, help="Natural language instruction given to the VLM.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible sampling.")
     parser.add_argument("--include_obstacle", action="store_true", help="Include the optional obstacle book in shelf.")
 
     parser.add_argument("-n", "--num_particles", type=int, default=1024, help="Number of particles.")
     parser.add_argument("--num_initial_plans", type=int, default=30, help="Number of plan skeletons to sample.")
+    parser.add_argument(
+        "--task_plan_max_depth",
+        type=int,
+        default=TAMPConfiguration.task_plan_max_depth,
+        help="Maximum symbolic search depth for each subgoal planning problem.",
+    )
     parser.add_argument("--num_opt_steps", type=int, default=1000, help="Maximum optimization steps per skeleton.")
     parser.add_argument("--max_duration", type=float, default=None, help="Maximum wall-clock duration per subplan.")
     parser.add_argument("--robot", default="panda", choices=["panda", "ur5"], help="Robot embodiment.")
@@ -120,6 +127,12 @@ def entrypoint():
         help="Optional cache directory for VLM requests.",
     )
     parser.add_argument(
+        "--vlm_render_style",
+        choices=["pybullet_rgb", "sim_3d", "simple_annotated"],
+        default=None,
+        help="Image style used for VLM scene rendering. Defaults to pybullet_rgb for mini_kitchen.",
+    )
+    parser.add_argument(
         "--disable_object_reduction",
         action="store_true",
         help="Disable object reduction for sequential subgoal planning.",
@@ -129,6 +142,9 @@ def entrypoint():
 
     setup_logging()
     set_random_seed(args.seed)
+
+    default_render_style = "pybullet_rgb" if args.env == "mini_kitchen" else TAMPConfiguration.vlm_render_style
+    render_style = args.vlm_render_style or default_render_style
 
     config = TAMPConfiguration(
         seed=args.seed,
@@ -140,6 +156,7 @@ def entrypoint():
         num_opt_steps=args.num_opt_steps,
         max_loop_dur=args.max_duration,
         num_initial_plans=args.num_initial_plans,
+        task_plan_max_depth=args.task_plan_max_depth,
         cache_subgraphs=args.cache_subgraphs,
         curobo_plan=args.motion_plan,
         enable_visualizer=not args.disable_visualizer,
@@ -159,12 +176,13 @@ def entrypoint():
         vlm_temperature=args.vlm_temperature,
         vlm_do_sample=args.vlm_do_sample,
         vlm_max_reprompts=args.vlm_max_reprompts,
+        vlm_render_style=render_style,
         vlm_enable_object_reduction=not args.disable_object_reduction,
         vlm_cache_dir=args.vlm_cache_dir,
     )
     validate_tamp_config(config)
 
-    env = load_book_shelf_env(include_obstacle=args.include_obstacle)
+    env = load_book_shelf_env(include_obstacle=args.include_obstacle) if args.env == "book_shelf" else load_mini_kitchen_env()
     cost_reducer = CostReducer(default_constraint_to_mult.copy())
     constraint_checker = ConstraintChecker(default_constraint_to_tol.copy())
     run_vlm_tamp(

@@ -53,6 +53,8 @@ class TAMPConfiguration:
     ## Task Planning and subgraph caching
     # Number of initial plans to sample
     num_initial_plans: int = 30
+    # Maximum symbolic task-plan search depth for a single subproblem.
+    task_plan_max_depth: int = 12
     # Whether to check if state has been explored before adding to search tree for task planning
     explored_state_check: bool = True
     # Cache particles for reuse - this is coupled to our current domains so the implementation is not general
@@ -145,7 +147,7 @@ class TAMPConfiguration:
     # Number of reprompt rounds after the initial VLM response.
     vlm_max_reprompts: int = 2
     # Render style used for VLM query images.
-    vlm_render_style: Literal["simple_annotated"] = "simple_annotated"
+    vlm_render_style: Literal["simple_annotated", "sim_3d", "pybullet_rgb"] = "sim_3d"
     # Whether to reduce planning objects for each subgoal.
     vlm_enable_object_reduction: bool = True
     # Optional cache directory for VLM responses.
@@ -183,6 +185,8 @@ def validate_tamp_config(config: TAMPConfiguration):
     # Task Planning and subgraph caching
     if config.num_initial_plans <= 0:
         raise ValueError(f"num_initial_plans must be positive, not {config.num_initial_plans}")
+    if config.task_plan_max_depth <= 0:
+        raise ValueError(f"task_plan_max_depth must be positive, not {config.task_plan_max_depth}")
     if config.cache_subgraphs and config.approach == "sampling":
         raise ValueError("cache_subgraphs is not compatible with sampling approach")
     if config.enable_retrieval and config.retrieval_num_particles <= 0:
@@ -239,7 +243,7 @@ def validate_tamp_config(config: TAMPConfiguration):
             raise ValueError(f"vlm_temperature must be non-negative, not {config.vlm_temperature}")
         if config.vlm_max_reprompts < 0:
             raise ValueError(f"vlm_max_reprompts must be non-negative, not {config.vlm_max_reprompts}")
-        if config.vlm_render_style not in {"simple_annotated"}:
+        if config.vlm_render_style not in {"simple_annotated", "sim_3d", "pybullet_rgb"}:
             raise ValueError(f"Unsupported vlm_render_style: {config.vlm_render_style}")
 
     # Collision checking

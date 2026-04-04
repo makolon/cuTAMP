@@ -20,6 +20,7 @@ from curobo.geom.types import Obstacle
 from curobo.types.base import TensorDeviceType
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
 from cutamp.envs import TAMPEnvironment
+from cutamp.envs.utils import get_container_interior_name
 from cutamp.robots import RobotContainer, load_robot_container
 from cutamp.robots.franka import franka_curobo_cfg, get_franka_ik_solver
 from cutamp.robots.ur5 import ur5_curobo_cfg, get_ur5_ik_solver
@@ -115,13 +116,18 @@ class TAMPWorld:
 
     @property
     def initial_state(self) -> State:
-        initial_state = get_initial_state(
+        initial_state = set(
+            get_initial_state(
             movables=self.get_objects_by_type("Movable", return_name=True),
             surfaces=self.get_objects_by_type("Surface", return_name=True),
             sticks=self.get_objects_by_type("Stick", return_name=True),
             buttons=self.get_objects_by_type("Button", return_name=True),
+            containers=self.get_objects_by_type("Container", return_name=True),
+            openables=self.get_objects_by_type("Openable", return_name=True),
+            )
         )
-        return initial_state
+        initial_state.update(self.env.initial_atoms)
+        return frozenset(initial_state)
 
     @property
     def goal_state(self) -> State:
@@ -140,6 +146,17 @@ class TAMPWorld:
         if name not in self._name_to_obj:
             raise ValueError(f"Object '{name}' not found in environment")
         return self._name_to_obj[name]
+
+    def get_container_interior(self, container_name: str) -> Obstacle:
+        """Get the interior geometry corresponding to a container name."""
+        return self.get_object(get_container_interior_name(self.env, container_name))
+
+    def get_openable_metadata(self, openable: str) -> dict:
+        """Get metadata for an openable."""
+        openables = self.env.metadata.get("openables", {})
+        if openable not in openables:
+            raise ValueError(f"Openable '{openable}' not found in environment metadata")
+        return openables[openable]
 
     def has_object(self, name: str) -> bool:
         """Whether the object with the given name exists in the environment."""

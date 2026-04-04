@@ -9,7 +9,7 @@
 
 import os
 import warnings
-from typing import Dict, List, ClassVar, Iterable, Sequence, Set, Tuple
+from typing import Any, Dict, List, ClassVar, Iterable, Sequence, Set, Tuple
 
 import torch
 import yaml
@@ -24,7 +24,7 @@ unit_pose = [0.0, 0.0, 0.0, *unit_quat]
 
 
 class TAMPEnvironment:
-    _known_types: ClassVar[Set[str]] = {"Movable", "Surface", "Button", "Stick"}
+    _known_types: ClassVar[Set[str]] = {"Movable", "Surface", "Button", "Stick", "Container", "Openable"}
 
     def __init__(
         self,
@@ -33,12 +33,16 @@ class TAMPEnvironment:
         statics: List[Obstacle],
         type_to_objects: Dict[str, List[Obstacle]],
         goal_state: State,
+        initial_atoms: State = frozenset(),
+        metadata: Dict[str, Any] | None = None,
     ):
         self.name = name
         self.movables = movables
         self.statics = statics
         self.type_to_objects = type_to_objects
         self.goal_state = goal_state
+        self.initial_atoms = initial_atoms
+        self.metadata = metadata.copy() if metadata is not None else {}
 
         # No object (identified by name) should be in both movables and statics
         movable_names = {obj.name for obj in movables}
@@ -126,9 +130,10 @@ def load_env_from_dict(env_dict: dict) -> TAMPEnvironment:
         type_to_objects[obj_type] = [name_to_obj[obj] for obj in objects]
 
     # Determine movables and statics. There is a Movable type which we use to determine movables
+    movable_objects = type_to_objects.get("Movable", [])
     movables, statics = [], []
     for obj in name_to_obj.values():
-        if obj in type_to_objects["Movable"]:
+        if obj in movable_objects:
             movables.append(obj)
         else:
             statics.append(obj)
@@ -150,12 +155,28 @@ def load_env_from_dict(env_dict: dict) -> TAMPEnvironment:
             goal_state.add(goal_atom)
     goal_state = frozenset(goal_state)
 
+    initial_atoms = set()
+    for atom_dict in env_dict.get("initial", []):
+        if not (isinstance(atom_dict, dict) and len(atom_dict) == 1):
+            raise ValueError(f"Initial atom should be a dict of length 1, not {atom_dict}")
+
+        for fluent_name, values in atom_dict.items():
+            if fluent_name not in name_to_fluent:
+                raise ValueError(f"Unknown fluent: {fluent_name}")
+            fluent = name_to_fluent[fluent_name]
+            if len(values) != len(fluent.parameters):
+                raise ValueError(f"Expected {len(fluent.parameters)} values for {fluent_name}, got {values}")
+            initial_atoms.add(fluent.ground(*values))
+    initial_atoms = frozenset(initial_atoms)
+
     env = TAMPEnvironment(
         name=env_dict["name"],
         movables=movables,
         statics=statics,
         type_to_objects=type_to_objects,
         goal_state=goal_state,
+        initial_atoms=initial_atoms,
+        metadata=env_dict.get("metadata", {}),
     )
     return env
 
@@ -186,6 +207,7 @@ def merge_tamp_environment_state(reference_env: TAMPEnvironment, state_env: TAMP
     merged = clone_tamp_environment(reference_env)
     for obj in state_env.movables + state_env.statics:
         set_object_pose(merged, obj.name, obj.pose)
+    _merge_openable_states(merged, state_env)
     return merged
 
 
@@ -195,6 +217,7 @@ def overlay_tamp_environment_states(template_env: TAMPEnvironment, state_envs: S
     for state_env in state_envs:
         for obj in state_env.movables + state_env.statics:
             set_object_pose(merged, obj.name, obj.pose)
+        _merge_openable_states(merged, state_env)
     return merged
 
 
@@ -219,9 +242,20 @@ def reduce_tamp_environment(
             filtered = [obj for obj in objects if obj.name in keep_movable_names]
         else:
             filtered = list(objects)
-        if filtered:
+        if filtered or obj_type == "Movable":
             new_type_to_objects[obj_type] = filtered
     reduced.type_to_objects = new_type_to_objects
+
+    filtered_initial_atoms = set()
+    for atom in reduced.initial_atoms:
+        keep_atom = True
+        for param, value in zip(atom.fluent.parameters, atom.values):
+            if param.type == "movable" and value not in keep_movable_names:
+                keep_atom = False
+                break
+        if keep_atom:
+            filtered_initial_atoms.add(atom)
+    reduced.initial_atoms = frozenset(filtered_initial_atoms)
 
     if goal_state is not None:
         reduced.goal_state = goal_state
@@ -274,8 +308,48 @@ def get_env_dict(env: TAMPEnvironment) -> dict:
         "geometries": geometries,
         "types": {obj_type: [obj.name for obj in objs] for obj_type, objs in env.type_to_objects.items()},
         "goal": [{goal_atom.fluent.name: goal_atom.values} for goal_atom in env.goal_state],
+        "initial": [{atom.fluent.name: atom.values} for atom in env.initial_atoms],
+        "metadata": env.metadata,
     }
     return env_dict
+
+
+def get_openable_state(env: TAMPEnvironment, openable: str) -> bool:
+    """Return whether the named openable is currently open."""
+    openables = env.metadata.get("openables", {})
+    if openable not in openables:
+        raise ValueError(f"Openable '{openable}' not found in environment metadata")
+    return bool(openables[openable]["is_open"])
+
+
+def get_container_interior_name(env: TAMPEnvironment, container: str) -> str:
+    """Return the interior geometry name associated with the container."""
+    openables = env.metadata.get("openables", {})
+    if container not in openables:
+        raise ValueError(f"Container '{container}' not found in environment metadata")
+    return str(openables[container]["interior"])
+
+
+def set_openable_state(env: TAMPEnvironment, openable: str, is_open: bool) -> None:
+    """Set an openable state and update the corresponding panel geometry pose in-place."""
+    openables = env.metadata.get("openables", {})
+    if openable not in openables:
+        raise ValueError(f"Openable '{openable}' not found in environment metadata")
+    openable_info = openables[openable]
+    pose_key = "open_pose" if is_open else "closed_pose"
+    panel_name = openable_info["panel"]
+    set_object_pose(env, panel_name, list(openable_info[pose_key]))
+    openable_info["is_open"] = bool(is_open)
+
+
+def _merge_openable_states(target_env: TAMPEnvironment, source_env: TAMPEnvironment) -> None:
+    source_openables = source_env.metadata.get("openables", {})
+    if not source_openables:
+        return
+    for openable, info in source_openables.items():
+        if "openables" not in target_env.metadata or openable not in target_env.metadata["openables"]:
+            continue
+        set_openable_state(target_env, openable, bool(info["is_open"]))
 
 
 def get_env_dir() -> str:

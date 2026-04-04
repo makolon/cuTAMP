@@ -19,10 +19,17 @@ def task_plan_generator(
     goal: State,
     operators: Sequence[Operator],
     explored_state_check: bool = True,
+    max_depth: int | None = None,
     max_plan_skeletons: int = 99999,
 ) -> Sequence[PlanSkeleton]:
     """Iterator that yields task plans."""
-    plan_iter = breadth_first_search(initial, goal, operators, explored_state_check=explored_state_check)
+    plan_iter = breadth_first_search(
+        initial,
+        goal,
+        operators,
+        explored_state_check=explored_state_check,
+        max_depth=max_depth,
+    )
     for _ in range(max_plan_skeletons):
         try:
             plan = next(plan_iter)

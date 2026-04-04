@@ -19,9 +19,11 @@ from cutamp.task_planning.constraints import (
     CollisionFreeGrasp,
     CollisionFreeHolding,
     CollisionFreePlacement,
+    ContainedIn,
     KinematicConstraint,
     Motion,
     StablePlacement,
+    ValidOpen,
     ValidPush,
     ValidPushStick,
 )
@@ -36,6 +38,8 @@ Grasp = "grasp"
 Movable = "movable"
 Surface = "surface"
 Button = "button"
+Container = "container"
+Openable = "openable"
 
 # Fluents (aka predicates)
 At = Fluent("At", [Parameter("q", Conf)])
@@ -47,11 +51,16 @@ HoldingWithGrasp = Fluent("HoldingWithGrasp", [Parameter("obj", Movable), Parame
 ButtonPushed = Fluent("ButtonPushed", [Parameter("button", "button")])
 PushedWithStick = Fluent("PushedWithStick", [Parameter("button", "button"), Parameter("obj", Movable)])
 CanPush = Fluent("CanPush", [Parameter("button", "button")])
+CanOpen = Fluent("CanOpen", [Parameter("container", Container)])
 IsMovable = Fluent("IsMovable", [Parameter("obj", Movable)])
 IsButton = Fluent("IsButton", [Parameter("button", Button)])
 IsSurface = Fluent("IsSurface", [Parameter("surface", Surface)])
+IsContainer = Fluent("IsContainer", [Parameter("container", Container)])
+IsOpenable = Fluent("IsOpenable", [Parameter("container", Container)])
 IsStick = Fluent("IsStick", [Parameter("obj", Movable)])
 HasNotPickedUp = Fluent("HasNotPickedUp", [Parameter("obj", Movable)])
+Open = Fluent("Open", [Parameter("container", Container)])
+In = Fluent("In", [Parameter("obj", Movable), Parameter("container", Container)])
 On = Fluent("On", [Parameter("obj", Movable), Parameter("surface", Surface)])
 
 all_tamp_fluents = [
@@ -64,11 +73,16 @@ all_tamp_fluents = [
     ButtonPushed,
     PushedWithStick,
     CanPush,
+    CanOpen,
     IsMovable,
     IsButton,
     IsSurface,
+    IsContainer,
+    IsOpenable,
     IsStick,
     HasNotPickedUp,
+    Open,
+    In,
     On,
 ]
 
@@ -82,6 +96,7 @@ traj = Parameter("traj", Traj)
 obj = Parameter("obj", Movable)
 button = Parameter("button", Button)
 surface = Parameter("surface", Surface)
+container = Parameter("container", Container)
 
 grasp = Parameter("grasp", Grasp)
 pose = Parameter("pose", Pose)
@@ -136,6 +151,51 @@ Pick = TAMPOperator(
     costs=[GraspCost(obj, grasp)],
 )
 
+PickFromSurface = TAMPOperator(
+    "PickFromSurface",
+    [obj, surface, grasp, q],
+    preconditions=[
+        At(q),
+        HandEmpty(),
+        IsMovable(obj),
+        IsSurface(surface),
+        On(obj, surface),
+        JustMoved(),
+        HasNotPickedUp(obj),
+    ],
+    add_effects=[
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        CanMove(),
+    ],
+    del_effects=[HandEmpty(), JustMoved(), HasNotPickedUp(obj), On(obj, surface)],
+    constraints=[KinematicConstraint(q, grasp), CollisionFreeGrasp(obj, grasp)],
+    costs=[GraspCost(obj, grasp)],
+)
+
+PickFromContainer = TAMPOperator(
+    "PickFromContainer",
+    [obj, container, grasp, q],
+    preconditions=[
+        At(q),
+        HandEmpty(),
+        IsMovable(obj),
+        IsContainer(container),
+        Open(container),
+        In(obj, container),
+        JustMoved(),
+        HasNotPickedUp(obj),
+    ],
+    add_effects=[
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        CanMove(),
+    ],
+    del_effects=[HandEmpty(), JustMoved(), HasNotPickedUp(obj), In(obj, container)],
+    constraints=[KinematicConstraint(q, grasp), CollisionFreeGrasp(obj, grasp)],
+    costs=[GraspCost(obj, grasp)],
+)
+
 Place = TAMPOperator(
     "Place",
     [obj, grasp, placement, surface, q],
@@ -157,6 +217,71 @@ Place = TAMPOperator(
         StablePlacement(obj, grasp, placement, surface),
         CollisionFreePlacement(obj, placement, surface),
     ],
+    costs=[],
+)
+
+PlaceOnSurface = TAMPOperator(
+    "PlaceOnSurface",
+    [obj, grasp, placement, surface, q],
+    preconditions=[
+        At(q),
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        IsSurface(surface),
+        JustMoved(),
+    ],
+    add_effects=[HandEmpty(), CanMove(), On(obj, surface)],
+    del_effects=[
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        JustMoved(),
+    ],
+    constraints=[
+        KinematicConstraint(q, placement),
+        StablePlacement(obj, grasp, placement, surface),
+        CollisionFreePlacement(obj, placement, surface),
+    ],
+    costs=[],
+)
+
+PlaceInContainer = TAMPOperator(
+    "PlaceInContainer",
+    [obj, grasp, placement, container, q],
+    preconditions=[
+        At(q),
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        IsContainer(container),
+        Open(container),
+        JustMoved(),
+    ],
+    add_effects=[HandEmpty(), CanMove(), In(obj, container)],
+    del_effects=[
+        Holding(obj),
+        HoldingWithGrasp(obj, grasp),
+        JustMoved(),
+    ],
+    constraints=[
+        KinematicConstraint(q, placement),
+        ContainedIn(obj, grasp, placement, container),
+        CollisionFreePlacement(obj, placement, container),
+    ],
+    costs=[],
+)
+
+OpenContainerOp = TAMPOperator(
+    "Open",
+    [container, pose, q],
+    preconditions=[
+        At(q),
+        HandEmpty(),
+        IsOpenable(container),
+        CanOpen(container),
+        JustMoved(),
+    ],
+    add_effects=[Open(container), CanMove()],
+    del_effects=[JustMoved(), CanOpen(container)],
+    constraints=[KinematicConstraint(q, pose), ValidOpen(container, pose)],
     costs=[],
 )
 
@@ -198,10 +323,24 @@ PushStick = TAMPOperator(
 )
 
 all_tamp_operators = [MoveFree, MoveHolding, Pick, Place, Push, PushStick]
+mini_kitchen_operators = [
+    MoveFree,
+    MoveHolding,
+    OpenContainerOp,
+    PickFromSurface,
+    PickFromContainer,
+    PlaceOnSurface,
+    PlaceInContainer,
+]
 
 
 def get_initial_state(
-    movables: Sequence[str] = (), surfaces: Sequence[str] = (), sticks: Sequence[str] = (), buttons: Sequence[str] = ()
+    movables: Sequence[str] = (),
+    surfaces: Sequence[str] = (),
+    sticks: Sequence[str] = (),
+    buttons: Sequence[str] = (),
+    containers: Sequence[str] = (),
+    openables: Sequence[str] = (),
 ) -> State:
     """Ground the initial state of the TAMP domain."""
     initial_state = {At.ground("q0"), HandEmpty.ground(), CanMove.ground()}
@@ -211,6 +350,12 @@ def get_initial_state(
 
     for surface in surfaces:
         initial_state.add(IsSurface.ground(surface))
+
+    for container_name in containers:
+        initial_state.add(IsContainer.ground(container_name))
+
+    for openable_name in openables:
+        initial_state.add(IsOpenable.ground(openable_name))
 
     for stick in sticks:
         initial_state.add(IsStick.ground(stick))
@@ -223,3 +368,10 @@ def get_initial_state(
 
     initial_state = frozenset(initial_state)
     return initial_state
+
+
+def get_tamp_operators_for_env(env_name: str):
+    """Return the operator set appropriate for the given environment."""
+    if env_name == "mini_kitchen":
+        return mini_kitchen_operators
+    return all_tamp_operators

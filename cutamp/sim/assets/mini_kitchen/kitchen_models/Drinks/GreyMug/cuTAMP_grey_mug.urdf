@@ -1,0 +1,23 @@
+<?xml version="1.0" ?>
+<robot name="cutamp_grey_mug">
+  <link name="base"/>
+  <link name="body">
+    <visual>
+      <origin xyz="0 0.0121835 -0.04"/>
+      <geometry>
+        <mesh filename="Krujka-Me.obj"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0.0121835 -0.04"/>
+      <geometry>
+        <mesh filename="Krujka-Me.obj"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="body_fixed" type="fixed">
+    <origin rpy="1.570796326794897 0 0" xyz="0 0 0"/>
+    <child link="body"/>
+    <parent link="base"/>
+  </joint>
+</robot>

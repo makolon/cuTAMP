@@ -174,6 +174,7 @@ def breadth_first_search(
     operators: Sequence[Operator],
     continue_branch_after_goal: bool = False,
     explored_state_check: bool = True,
+    max_depth: int | None = None,
     verbose: bool = False,
 ) -> Generator[List[GroundOperator], None, None]:
     """
@@ -220,6 +221,9 @@ def breadth_first_search(
             yield plan
             if not continue_branch_after_goal:
                 continue  # stop exploring this branch as we already satisfied the goal
+
+        if max_depth is not None and node.depth >= max_depth:
+            continue
 
         # Get successor and add to frontier
         ground_ops = get_valid_ground_operators(node, operators, verbose=verbose)
