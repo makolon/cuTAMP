@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from collections import defaultdict, deque
@@ -293,8 +294,12 @@ class VLMTAMPTests(unittest.TestCase):
             )
             self.assertTrue(image_path.exists())
             self.assertTrue((Path(tmpdir) / "query_00_view0.png").exists())
-            self.assertTrue((Path(tmpdir) / "query_00_view1.png").exists())
-            self.assertTrue((Path(tmpdir) / "query_00_camera_meta.json").exists())
+            self.assertFalse((Path(tmpdir) / "query_00_view1.png").exists())
+            camera_meta_path = Path(tmpdir) / "query_00_camera_meta.json"
+            self.assertTrue(camera_meta_path.exists())
+            with open(camera_meta_path, "r", encoding="utf-8") as f:
+                camera_meta = json.load(f)
+            self.assertEqual(len(camera_meta["cameras"]), 1)
             self.assertTrue((Path(tmpdir) / "query_00.png").exists())
 
     def test_task_planner_uses_open_before_pick_from_container(self):

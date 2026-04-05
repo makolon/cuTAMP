@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import math
+from typing import Iterable
 
 from curobo.geom.types import Cuboid
 
@@ -32,7 +33,73 @@ def _yaw_quat(yaw_deg: float) -> list[float]:
     return [math.cos(yaw_rad / 2.0), 0.0, 0.0, math.sin(yaw_rad / 2.0)]
 
 
-def load_mini_kitchen_env() -> TAMPEnvironment:
+def _aabb_to_pose_dims(aabb: tuple[tuple[float, float, float], tuple[float, float, float]]) -> tuple[list[float], list[float]]:
+    lower, upper = aabb
+    dims = [max(float(upper[i] - lower[i]), 1e-4) for i in range(3)]
+    pose = [float((lower[i] + upper[i]) * 0.5) for i in range(3)] + list(unit_quat)
+    return pose, dims
+
+
+def _align_env_with_pybullet_kitchen_world(env: TAMPEnvironment) -> TAMPEnvironment:
+    """Align cuboid planning geometry to PyBullet Kitchen World AABBs for tighter environment consistency."""
+    import pybullet as pb
+
+    from cutamp.sim.pybullet_scene import build_pybullet_scene, disconnect_pybullet_scene
+
+    scene = build_pybullet_scene(env)
+    name_to_obj = {obj.name: obj for obj in env.movables + env.statics}
+
+    # Align all assets that have 1:1 names between TAMP objects and PyBullet bodies.
+    for asset_name in scene.asset_specs:
+        if asset_name not in name_to_obj:
+            continue
+        body_id = scene.body_ids[asset_name]
+        aabb = pb.getAABB(body_id, -1, physicsClientId=scene.client_id)
+        pose, dims = _aabb_to_pose_dims(aabb)
+        obj = name_to_obj[asset_name]
+        obj.pose = pose
+        obj.dims = dims
+
+    # Align openable panels from their articulated joint-link AABBs.
+    for openable_name, joint_group in scene.openable_joints.items():
+        openable_meta = env.metadata.get("openables", {}).get(openable_name)
+        if openable_meta is None:
+            continue
+
+        joint_aabbs = []
+        for joint_spec in joint_group["joints"]:
+            body_id = scene.body_ids[joint_spec["body_name"]]
+            link_aabb = pb.getAABB(body_id, joint_spec["joint_index"], physicsClientId=scene.client_id)
+            joint_aabbs.append(link_aabb)
+        if not joint_aabbs:
+            continue
+
+        lower = [min(aabb[0][axis] for aabb in joint_aabbs) for axis in range(3)]
+        upper = [max(aabb[1][axis] for aabb in joint_aabbs) for axis in range(3)]
+        panel_pose, panel_dims = _aabb_to_pose_dims((tuple(lower), tuple(upper)))
+
+        panel_name = openable_meta.get("panel")
+        if panel_name in name_to_obj:
+            panel_obj = name_to_obj[panel_name]
+            panel_obj.pose = panel_pose
+            panel_obj.dims = panel_dims
+            openable_meta["closed_pose"] = list(panel_pose)
+
+        # Derive a small handle region on the panel front; this is used by ValidOpen reachability checks.
+        handle_name = openable_meta.get("handle")
+        if handle_name in name_to_obj:
+            handle_obj = name_to_obj[handle_name]
+            handle_dims = list(handle_obj.dims)
+            thin_axis = min(range(3), key=lambda idx: panel_dims[idx])
+            handle_pose = list(panel_pose)
+            handle_pose[thin_axis] = upper[thin_axis] + 0.5 * handle_dims[thin_axis]
+            handle_obj.pose = handle_pose
+
+    disconnect_pybullet_scene(scene)
+    return env
+
+
+def load_mini_kitchen_env(*, use_pybullet_layout: bool = False) -> TAMPEnvironment:
     """A compact articulated-kitchen environment for long-horizon VLM-TAMP experiments."""
     wood_dark = [185, 145, 102]
     wood_light = [227, 196, 152]
@@ -188,13 +255,15 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     spoon = Cuboid(
         name="spoon",
         dims=[0.12, 0.025, 0.02],
-        pose=[0.804, 0.150, drawer_floor_z + 0.01 + z_buffer, *unit_quat],
+        # Keep the long axis object fully inside the drawer interior AABB at reset.
+        pose=[0.826, 0.188, drawer_floor_z + 0.01 + z_buffer, *unit_quat],
         color=[178, 178, 178],
     )
     fork = Cuboid(
         name="fork",
         dims=[0.12, 0.025, 0.02],
-        pose=[0.854, 0.118, drawer_floor_z + 0.01 + z_buffer, *unit_quat],
+        # Keep clear of the closed drawer front panel near y ~= 0.118.
+        pose=[0.846, 0.206, drawer_floor_z + 0.01 + z_buffer, *unit_quat],
         color=[162, 162, 162],
     )
     movables = [mug, bowl, plate, spoon, fork]
@@ -218,19 +287,10 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
         "image_size": [704, 512],
         "background_color": [241, 243, 246],
         "object_assets": {
-            "big_table": {"urdf": "big_table.urdf", "sync_pose_from_env": True},
             "table": {"urdf": "table.urdf", "sync_pose_from_env": True},
-            "counter_scene": {
-                "urdf": "kitchen_worlds_counter/counter/urdf/kitchen_part_right_gen_convex.urdf",
-                "sync_pose_from_env": False,
-                "base_pose": [
-                    COUNTER_SCENE_BASE_XY[0],
-                    COUNTER_SCENE_BASE_XY[1],
-                    COUNTER_SCENE_BASE_Z,
-                    *_yaw_quat(COUNTER_SCENE_YAW_DEG),
-                ],
-                "global_scaling": COUNTER_SCENE_SCALE,
-            },
+            "counter": {"urdf": "counter.urdf", "sync_pose_from_env": True},
+            "cabinet": {"urdf": "cabinet_unit.urdf", "sync_pose_from_env": True},
+            "drawer": {"urdf": "drawer_unit.urdf", "sync_pose_from_env": True},
             "mug": {
                 "urdf": "kitchen_models/Drinks/GreyMug/cuTAMP_grey_mug.urdf",
                 "sync_pose_from_env": True,
@@ -252,22 +312,16 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
         "openable_joints": {
             "cabinet": [
                 {
-                    "body_name": "counter_scene",
-                    "joint_name": "indigo_door_left_joint",
-                    "closed_value": 0.0,
-                    "open_value": -1.15,
-                },
-                {
-                    "body_name": "counter_scene",
-                    "joint_name": "indigo_door_right_joint",
+                    "body_name": "cabinet",
+                    "joint_name": "door_hinge",
                     "closed_value": 0.0,
                     "open_value": 1.15,
                 },
             ],
             "drawer": [
                 {
-                    "body_name": "counter_scene",
-                    "joint_name": "hitman_drawer_top_joint",
+                    "body_name": "drawer",
+                    "joint_name": "drawer_slide",
                     "closed_value": 0.0,
                     "open_value": 0.18,
                 }
@@ -275,22 +329,13 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
         },
         "cameras": [
             {
-                "name": "overview",
-                "eye_position": [0.22, 0.72, 0.94],
-                "target_position": [0.90, -0.10, 0.18],
+                "name": "front",
+                "eye_position": [0.86, 0.62, 0.48],
+                "target_position": [0.86, -0.12, 0.20],
                 "up_vector": [0.0, 0.0, 1.0],
-                "fov": 42.0,
+                "fov": 38.0,
                 "near": 0.01,
                 "far": 4.0,
-            },
-            {
-                "name": "workspace",
-                "eye_position": [0.44, 0.18, 0.50],
-                "target_position": [0.90, -0.24, 0.15],
-                "up_vector": [0.0, 0.0, 1.0],
-                "fov": 34.0,
-                "near": 0.01,
-                "far": 3.0,
             },
         ],
     }
@@ -320,7 +365,6 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
             "set_table": "open the cabinet and drawer, then place the plate, mug, and spoon on the table",
         },
         "vlm_frame_exclude": [
-            "big_table",
             "cabinet",
             "drawer",
             "cabinet_shell_left",
@@ -335,7 +379,6 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
     }
 
     statics = [
-        big_table,
         table,
         counter,
         cabinet_proxy,
@@ -355,7 +398,7 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
         drawer_handle,
     ]
 
-    return TAMPEnvironment(
+    env = TAMPEnvironment(
         name="mini_kitchen",
         movables=movables,
         statics=statics,
@@ -369,3 +412,6 @@ def load_mini_kitchen_env() -> TAMPEnvironment:
         initial_atoms=initial_atoms,
         metadata=metadata,
     )
+    if use_pybullet_layout:
+        env = _align_env_with_pybullet_kitchen_world(env)
+    return env

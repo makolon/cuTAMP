@@ -28,6 +28,12 @@ def entrypoint():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--env", default="book_shelf", choices=["book_shelf", "mini_kitchen"], help="Environment to run.")
+    parser.add_argument(
+        "--mini_kitchen_layout",
+        choices=["pybullet", "analytic"],
+        default="pybullet",
+        help="Geometry source for mini_kitchen planning environment.",
+    )
     parser.add_argument("--open_goal", required=True, help="Natural language instruction given to the VLM.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible sampling.")
     parser.add_argument("--include_obstacle", action="store_true", help="Include the optional obstacle book in shelf.")
@@ -186,7 +192,10 @@ def entrypoint():
     )
     validate_tamp_config(config)
 
-    env = load_book_shelf_env(include_obstacle=args.include_obstacle) if args.env == "book_shelf" else load_mini_kitchen_env()
+    if args.env == "book_shelf":
+        env = load_book_shelf_env(include_obstacle=args.include_obstacle)
+    else:
+        env = load_mini_kitchen_env(use_pybullet_layout=args.mini_kitchen_layout == "pybullet")
     cost_reducer = CostReducer(default_constraint_to_mult.copy())
     constraint_checker = ConstraintChecker(default_constraint_to_tol.copy())
     run_vlm_tamp(

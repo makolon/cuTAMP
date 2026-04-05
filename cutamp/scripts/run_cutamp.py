@@ -31,14 +31,14 @@ from cutamp.scripts.utils import (
 )
 
 
-def load_demo_env(name: str, tetris_random_yaws: bool = False) -> TAMPEnvironment:
+def load_demo_env(name: str, tetris_random_yaws: bool = False, mini_kitchen_layout: str = "pybullet") -> TAMPEnvironment:
     if name.startswith("tetris_"):
         num_blocks = int(name.split("tetris_")[-1])
         env = load_tetris_env(num_blocks, buffer_multiplier=1.0, random_yaws=tetris_random_yaws)
     elif name == "book_shelf":
         env = load_book_shelf_env()
     elif name == "mini_kitchen":
-        env = load_mini_kitchen_env()
+        env = load_mini_kitchen_env(use_pybullet_layout=mini_kitchen_layout == "pybullet")
     elif name == "stick_button":
         env = load_stick_button_env()
     elif name == "blocks":
@@ -120,6 +120,12 @@ def entrypoint():
         "--tetris_random_yaws",
         action="store_true",
         help="Randomize initial yaw of Tetris blocks. Useful for retrieval data collection and benchmarking.",
+    )
+    parser.add_argument(
+        "--mini_kitchen_layout",
+        choices=["pybullet", "analytic"],
+        default="pybullet",
+        help="Geometry source for mini_kitchen planning environment.",
     )
 
     # Approach
@@ -291,7 +297,11 @@ def entrypoint():
     validate_tamp_config(config)
 
     # Load env and run demo
-    env = load_demo_env(args.env, tetris_random_yaws=args.tetris_random_yaws)
+    env = load_demo_env(
+        args.env,
+        tetris_random_yaws=args.tetris_random_yaws,
+        mini_kitchen_layout=args.mini_kitchen_layout,
+    )
     cutamp_demo(env, config, experiment_id=args.experiment_id, use_tetris_tuned_weights=args.tuned_tetris_weights)
 
 
