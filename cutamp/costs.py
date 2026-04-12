@@ -12,8 +12,6 @@ from typing import Optional
 import torch
 from jaxtyping import Float
 
-from curobo.types.math import Pose
-
 
 def trajectory_length(
     confs: Float[torch.Tensor, "b *h d"], weights: Optional[Float[torch.Tensor, "d"]] = None
@@ -126,19 +124,23 @@ def curobo_pose_error(
     pose_a_mat4x4: Float[torch.Tensor, "b *h 4 4"], pose_b_mat4x4: Float[torch.Tensor, "b *h 4 4"]
 ) -> (Float[torch.Tensor, "b *h"], Float[torch.Tensor, "b *h"]):
     """
-    Compute the translational and rotational errors between two poses using curobo. Thanks Bala.
+    Compute translational and rotational pose errors directly from homogeneous transforms.
+
+    The rotational term matches cuRobo's default orientation error scaling (`sin(theta / 2)`) while
+    avoiding matrix-to-quaternion conversion in the backward pass.
     """
-    # Flatten
-    pose_a_flat = pose_a_mat4x4.view(-1, 4, 4)
-    pose_b_flat = pose_b_mat4x4.view(-1, 4, 4)
+    pos_a = pose_a_mat4x4[..., :3, 3]
+    pos_b = pose_b_mat4x4[..., :3, 3]
+    p_dist = torch.linalg.norm(pos_a - pos_b, dim=-1)
 
-    # Create curobo pose
-    pose_a = Pose.from_matrix(pose_a_flat)
-    pose_b = Pose.from_matrix(pose_b_flat)
+    rot_a = pose_a_mat4x4[..., :3, :3]
+    rot_b = pose_b_mat4x4[..., :3, :3]
+    rel_rot = rot_a @ rot_b.transpose(-1, -2)
+    trace = rel_rot.diagonal(offset=0, dim1=-1, dim2=-2).sum(dim=-1)
 
-    # Compute distance and unflatten
-    p_dist_flat, quat_dist_flat = pose_a.distance(pose_b)
-    p_dist = p_dist_flat.view(pose_a_mat4x4.shape[:-2])
-    quat_dist = quat_dist_flat.view(pose_b_mat4x4.shape[:-2])
+    # For a relative rotation angle theta, trace(R)=1+2cos(theta) and cuRobo's default
+    # orientation error is ||imag(q_rel)|| = sin(theta / 2).
+    quat_dist = torch.sqrt(torch.clamp((3.0 - trace) * 0.25, min=0.0))
+
     assert p_dist.shape == quat_dist.shape
     return p_dist, quat_dist
