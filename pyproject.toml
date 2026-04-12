@@ -25,6 +25,7 @@ dependencies = [
     "jaxtyping",
     "omegaconf",
     "open3d",
+    "opencv-python",
     "rerun-sdk",
     "roma",
     "tqdm",
