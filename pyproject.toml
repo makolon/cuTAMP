@@ -56,6 +56,15 @@ cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+cutamp = [
+    "envs/assets/**/*",
+    "robots/assets/**/*",
+]
+
 [tool.uv.sources]
 torchaudio = { index = "torch" }
 torch = { index = "torch" }
