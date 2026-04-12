@@ -47,10 +47,9 @@ class ParticleOptimizer:
         self.constraint_checker = constraint_checker
         self.get_satisfying_mask = self.constraint_checker.get_mask
 
-        self.prop_satisfying_break = getattr(self.config, "prop_satisfying_break", None)
         self.num_satisfying_break = (
-            int(self.prop_satisfying_break * self.config.num_particles)
-            if self.prop_satisfying_break is not None
+            int(self.config.prop_satisfying_break * self.config.num_particles)
+            if self.config.prop_satisfying_break is not None
             else None
         )
 
@@ -85,8 +84,6 @@ class ParticleOptimizer:
 
         param_groups = []
         param_msg = []
-        optimized_params = {}
-        conf_params = {}
         for param, val in particles.items():
             param_type = param_to_type.get(param)
             if param_type not in self.types_to_optimize:
@@ -98,9 +95,7 @@ class ParticleOptimizer:
             group = {"params": val}
             if param_type == Conf:
                 group["lr"] = self.config.conf_lr
-                conf_params[param] = val
             param_groups.append(group)
-            optimized_params[param] = val
             opt_metrics["opt_params"][param] = {"type": param_type, "shape": list(val.shape)}
             val.requires_grad = True
 
@@ -119,21 +114,6 @@ class ParticleOptimizer:
         _log.debug(f"Optimizing {num_total_params} parameters, {', '.join(param_msg)}")
         total_dof = sum(p.shape[-1] for group in optimizer.param_groups for p in group["params"])
         _log.debug(f"Total DOF for each particle: {total_dof}")
-
-        # Soft bounds from initialization keep updates in a numerically stable region.
-        param_bounds = {}
-        for name, val in optimized_params.items():
-            lower = val.detach().amin(dim=0)
-            upper = val.detach().amax(dim=0)
-            span = torch.clamp(upper - lower, min=1e-3)
-            margin = 2.0 * span
-            param_bounds[name] = (lower - margin, upper + margin)
-
-        conf_lower = conf_upper = None
-        if conf_params:
-            joint_limits = rollout_fn.world.robot_container.joint_limits
-            conf_lower = joint_limits[0]
-            conf_upper = joint_limits[1]
 
         indices = torch.arange(self.config.num_particles, device="cuda")
         consider_types = {"constraint"}
@@ -173,7 +153,7 @@ class ParticleOptimizer:
             # If num satisfying bigger than desired proportion, break
             if self.num_satisfying_break is not None and num_satisfying >= self.num_satisfying_break:
                 _log.info(
-                    f"Found {num_satisfying} >= {self.num_satisfying_break} ({self.prop_satisfying_break * 100:.2f}%) satisfying particles "
+                    f"Found {num_satisfying} >= {self.num_satisfying_break} ({self.config.prop_satisfying_break * 100:.2f}%) satisfying particles "
                 )
                 break
 
@@ -224,23 +204,7 @@ class ParticleOptimizer:
 
             # Compute gradients and step the optimizer
             loss.backward()
-            params_flat = [p for group in optimizer.param_groups for p in group["params"]]
-            torch.nn.utils.clip_grad_norm_(params_flat, max_norm=100.0)
             optimizer.step()
-
-            with torch.no_grad():
-                for name, val in optimized_params.items():
-                    bound_min, bound_max = param_bounds[name]
-                    bound_min = bound_min.to(device=val.device, dtype=val.dtype)
-                    bound_max = bound_max.to(device=val.device, dtype=val.dtype)
-                    val.clamp_(min=bound_min, max=bound_max)
-
-                if conf_lower is not None and conf_upper is not None:
-                    conf_min = conf_lower.to(device=next(iter(conf_params.values())).device)
-                    conf_max = conf_upper.to(device=next(iter(conf_params.values())).device)
-                    for val in conf_params.values():
-                        val.clamp_(min=conf_min.to(dtype=val.dtype), max=conf_max.to(dtype=val.dtype))
-
             timer.stop("optimization_step")
             pbar.set_description(
                 f"Loss: {loss:.3f}, Min: {costs.min():.3f}, {num_satisfying}/{self.config.num_particles} satisfying"

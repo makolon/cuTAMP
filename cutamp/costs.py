@@ -10,6 +10,7 @@
 from typing import Optional
 
 import torch
+from curobo.types.math import Pose
 from jaxtyping import Float
 
 
@@ -131,21 +132,19 @@ def curobo_pose_error(
     pose_a_mat4x4: Float[torch.Tensor, "b *h 4 4"], pose_b_mat4x4: Float[torch.Tensor, "b *h 4 4"]
 ) -> (Float[torch.Tensor, "b *h"], Float[torch.Tensor, "b *h"]):
     """
-    Compute pose errors directly from matrices without matrix-to-quaternion conversion.
-
-    This matches cuRobo's linear distance and rotation distance magnitude
-    while avoiding Pose.from_matrix in gradient paths.
+    Compute the translational and rotational errors between two poses using curobo. Thanks Bala.
     """
-    pos_a = pose_a_mat4x4[..., :3, 3]
-    pos_b = pose_b_mat4x4[..., :3, 3]
-    p_dist = torch.linalg.norm(pos_a - pos_b, dim=-1)
+    # Flatten
+    pose_a_flat = pose_a_mat4x4.view(-1, 4, 4)
+    pose_b_flat = pose_b_mat4x4.view(-1, 4, 4)
 
-    rot_a = pose_a_mat4x4[..., :3, :3]
-    rot_b = pose_b_mat4x4[..., :3, :3]
-    rel_rot = rot_a @ rot_b.transpose(-1, -2)
-    trace = rel_rot[..., 0, 0] + rel_rot[..., 1, 1] + rel_rot[..., 2, 2]
-    quat_term = torch.clamp((3.0 - trace) * 0.25, min=0.0)
-    quat_dist = torch.sqrt(quat_term)
+    # Create curobo pose
+    pose_a = Pose.from_matrix(pose_a_flat)
+    pose_b = Pose.from_matrix(pose_b_flat)
 
+    # Compute distance and unflatten
+    p_dist_flat, quat_dist_flat = pose_a.distance(pose_b)
+    p_dist = p_dist_flat.view(pose_a_mat4x4.shape[:-2])
+    quat_dist = quat_dist_flat.view(pose_b_mat4x4.shape[:-2])
     assert p_dist.shape == quat_dist.shape
     return p_dist, quat_dist
