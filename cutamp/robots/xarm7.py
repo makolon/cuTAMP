@@ -26,6 +26,7 @@ def xarm7_curobo_cfg() -> dict:
         cfg = load_yaml(str(local_cfg))
         kin_cfg = cfg["robot_cfg"]["kinematics"]
         kin_cfg["external_asset_path"] = str(_ASSETS_DIR)
+        kin_cfg["external_robot_configs_path"] = str(_ASSETS_DIR)
         return cfg
     return load_yaml(join_path(get_robot_configs_path(), "xarm7.yml"))
 
