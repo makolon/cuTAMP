@@ -275,12 +275,13 @@ You can try installing `GLIBCXX` via conda:
 conda install -c conda-forge libstdcxx-ng -y
 ```
 
-### `Failed to find backward kernel 'compute_matrix_to_quat'`
+### `Failed to find backward kernel 'compute_matrix_to_quat'` or `'compute_quat_to_matrix'`
 
 If you see an error like this during `loss.backward()`:
 
 ```text
 RuntimeError: Failed to find backward kernel 'compute_matrix_to_quat' from module 'curobo.geom.transform'
+RuntimeError: Failed to find backward kernel 'compute_quat_to_matrix' from module 'curobo.geom.transform'
 ```
 
 the most common cause is a runtime mismatch where cuRobo is imported from one environment while Warp is imported

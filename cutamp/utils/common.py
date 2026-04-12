@@ -94,6 +94,25 @@ def mat4x4_to_pose(mat4x4: Float[torch.Tensor, "*b 4 4"], detach: bool = False) 
     return Pose(position=position, quaternion=quat_wxyz, normalize_rotation=True)
 
 
+def pose_wxyz_to_mat4x4(
+    position: Float[torch.Tensor, "*b 3"], quaternion_wxyz: Float[torch.Tensor, "*b 4"]
+) -> Float[torch.Tensor, "*b 4 4"]:
+    """Convert position + wxyz quaternion tensors to homogeneous transforms using torch ops."""
+    if position.shape[:-1] != quaternion_wxyz.shape[:-1]:
+        raise ValueError(
+            f"Expected matching batch dimensions for position and quaternion, got {position.shape} and {quaternion_wxyz.shape}"
+        )
+
+    quat_xyzw = quat_wxyz_to_xyzw(quaternion_wxyz)
+    rotation = unitquat_to_rotmat(quat_xyzw)
+
+    mat4x4 = torch.zeros(*position.shape[:-1], 4, 4, device=position.device, dtype=position.dtype)
+    mat4x4[..., :3, :3] = rotation.to(dtype=position.dtype)
+    mat4x4[..., :3, 3] = position
+    mat4x4[..., 3, 3] = 1.0
+    return mat4x4
+
+
 def transform_spheres(
     spheres: Float[torch.Tensor, "num_spheres 4"], transform: Float[torch.Tensor, "*b 4 4"]
 ) -> Float[torch.Tensor, "*b num_spheres 4"]:
