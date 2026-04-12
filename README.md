@@ -92,7 +92,7 @@ git lfs install
 Then clone and install cuRobo:
 
 ```bash
-git clone --branch v0.7.7 https://github.com/NVlabs/curobo.git
+git clone --branch v0.7.6 https://github.com/NVlabs/curobo.git
 cd curobo
 
 # This can take up to 20 minutes to install
