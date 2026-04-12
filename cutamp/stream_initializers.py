@@ -9,7 +9,7 @@ from jaxtyping import Float
 from cutamp.utils.common import action_4dof_to_mat4x4, action_6dof_to_mat4x4
 
 
-def _as_mapping(value: object) -> dict[str, object]:
+def as_mapping(value: object) -> dict[str, object]:
     if isinstance(value, Mapping):
         return {str(key): item for key, item in value.items()}
     return {}
@@ -18,7 +18,7 @@ def _as_mapping(value: object) -> dict[str, object]:
 def get_stream_payload(stream_initializers: Mapping[str, object] | None, stream_name: str) -> dict[str, object]:
     if stream_initializers is None:
         return {}
-    return _as_mapping(stream_initializers.get(stream_name))
+    return as_mapping(stream_initializers.get(stream_name))
 
 
 def sample_initializer_indices(

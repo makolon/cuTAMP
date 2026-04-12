@@ -36,7 +36,6 @@ from cutamp.utils.common import (
     Particles,
     action_4dof_to_mat4x4,
     action_6dof_to_mat4x4,
-    mat4x4_to_pose,
     pose_list_to_mat4x4,
     sample_between_bounds,
     transform_spheres,
@@ -148,7 +147,6 @@ class ParticleInitializer:
                         world_from_grasp = world_from_obj @ grasp_transforms
                         world_from_ee = world_from_grasp @ world.tool_from_ee
 
-                        world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                         ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)
                         log_debug(
                             f"{header}. External grasp IK success: "
@@ -191,7 +189,6 @@ class ParticleInitializer:
                     world_from_ee = world_from_grasp @ world.tool_from_ee
 
                     # Solve IK with cuRobo
-                    world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                     ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)  # TODO: seeding
                     log_debug(
                         f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
@@ -263,7 +260,6 @@ class ParticleInitializer:
                                     obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
                                 world_from_grasp = world_from_obj @ obj_from_grasp
                                 world_from_ee = world_from_grasp @ world.tool_from_ee
-                                world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                                 ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)
                                 log_debug(
                                     f"{header}. External place IK success: "
@@ -318,7 +314,6 @@ class ParticleInitializer:
                     world_from_ee = world_from_grasp @ world.tool_from_ee
 
                     # Solve IK
-                    world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                     ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)  # TODO: seeding?
                     log_debug(
                         f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
@@ -384,7 +379,6 @@ class ParticleInitializer:
                 world_from_ee = world_from_push @ world.tool_from_ee
 
                 # Solve IK with cuRobo
-                world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                 ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)  # TODO: seeding
                 log_debug(
                     f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
@@ -485,7 +479,6 @@ class ParticleInitializer:
                 world_from_ee = world_from_grasp @ world.tool_from_ee
 
                 # Solve IK with cuRobo
-                world_from_ee = mat4x4_to_pose(world_from_ee, detach=True)
                 ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)  # TODO: seeding
                 log_debug(
                     f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
