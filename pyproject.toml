@@ -38,7 +38,7 @@ dependencies = [
     "transformers==5.4.0",
     # Third-party integrations
     "causal-conv1d",
-    "nvidia-curobo",
+    "nvidia-curobo @ git+https://github.com/williamshen-nz/curobo.git@b5fad1df2a3ac4d3e33e369918b7d62d0e59ebd1",
 ]
 
 [project.optional-dependencies]
@@ -72,8 +72,6 @@ torchvision = { index = "torch" }
 
 # Git sources
 causal-conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git" }
-# Pin to v0.7.6 commit to avoid API drift from upstream HEAD.
-nvidia-curobo = { git = "https://github.com/williamshen-nz/curobo" }
 
 [[tool.uv.index]]
 explicit = true

@@ -19,7 +19,7 @@ from curobo.types.math import Pose
 from curobo.types.state import JointState
 from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
 
-from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
+from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4, mat4x4_to_pose
 from cutamp.config import TAMPConfiguration
 from cutamp.optimize_plan import PlanContainer
 from cutamp.tamp_domain import MoveHolding, Push, PushStick, MoveFree, Place, Pick
@@ -102,7 +102,9 @@ def solve_curobo(
                 if last_q_name != "q0":
                     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
                     world_from_retract = world_from_ee @ approach_offset
-                    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
+                    retract_result = motion_gen.plan_single(
+                        start_js, mat4x4_to_pose(world_from_retract, detach=True), plan_config
+                    )
                     if not retract_result.success:
                         raise RuntimeError(
                             f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
@@ -122,7 +124,9 @@ def solve_curobo(
                 world_from_ee = world_from_grasp @ world.tool_from_ee
 
                 world_from_approach = world_from_ee @ approach_offset
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
+                approach_result = motion_gen.plan_single(
+                    retract_js, mat4x4_to_pose(world_from_approach, detach=True), plan_config
+                )
                 if not approach_result.success:
                     raise RuntimeError(
                         f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
@@ -130,7 +134,9 @@ def solve_curobo(
 
                 # Plan to from approach to end js
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(world_from_ee), plan_config)
+                end_result = motion_gen.plan_single(
+                    approach_js, mat4x4_to_pose(world_from_ee, detach=True), plan_config
+                )
                 if not end_result.success:
                     _log.error(
                         "Start state:",
@@ -226,7 +232,9 @@ def solve_curobo(
                 world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
                 world_from_ee_start = world_from_ee
                 world_from_retract = world_from_ee @ approach_offset
-                retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
+                retract_result = motion_gen.plan_single(
+                    start_js, mat4x4_to_pose(world_from_retract, detach=True), plan_config
+                )
                 if not retract_result.success:
                     raise RuntimeError(
                         f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
@@ -242,7 +250,9 @@ def solve_curobo(
                 world_from_grasp = world_from_obj @ obj_from_grasp
                 world_from_ee = world_from_grasp @ world.tool_from_ee
                 world_from_approach = world_from_ee @ approach_offset
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
+                approach_result = motion_gen.plan_single(
+                    retract_js, mat4x4_to_pose(world_from_approach, detach=True), plan_config
+                )
                 if not approach_result.success:
                     raise RuntimeError(
                         f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
@@ -250,7 +260,9 @@ def solve_curobo(
 
                 # Plan from approach to end js
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(approach_js, Pose.from_matrix(world_from_ee), plan_config)
+                end_result = motion_gen.plan_single(
+                    approach_js, mat4x4_to_pose(world_from_ee, detach=True), plan_config
+                )
                 if not end_result.success:
                     raise RuntimeError(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
@@ -288,7 +300,7 @@ def solve_curobo(
                 motion_gen.world_coll_checker.enable_obstacle(enable=True, name=obj)
                 obj_pose = obj_to_current_pose[obj]
                 motion_gen.world_collision.update_obstacle_pose(
-                    obj, Pose.from_matrix(obj_pose), update_cpu_reference=True
+                    obj, mat4x4_to_pose(obj_pose, detach=True), update_cpu_reference=True
                 )
 
             # Open the gripper for visualization purposes
@@ -326,7 +338,7 @@ def solve_curobo(
     # Plan to retract
     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
     world_from_retract = world_from_ee @ approach_offset
-    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), plan_config)
+    retract_result = motion_gen.plan_single(start_js, mat4x4_to_pose(world_from_retract, detach=True), plan_config)
     if not retract_result.success:
         raise RuntimeError(f"Failed to plan for retract. Status: {retract_result.status}")
     dt = retract_result.interpolation_dt

@@ -21,6 +21,7 @@ from curobo.geom.types import (
     Sphere,
     WorldConfig,
 )
+from curobo.types.math import Pose
 from einops import einsum
 from jaxtyping import Float
 from roma import quat_wxyz_to_xyzw, unitquat_to_rotmat
@@ -77,6 +78,20 @@ def action_6dof_to_mat4x4(action_6dof: Float[torch.Tensor, "*b 6"]) -> Float[tor
     mat4x4[..., :3, :3] = roma.euler_to_rotmat("XYZ", rpy)
     mat4x4[..., :3, 3] = translation
     return mat4x4
+
+
+def mat4x4_to_pose(mat4x4: Float[torch.Tensor, "*b 4 4"], detach: bool = False) -> Pose:
+    """Convert homogeneous transforms to cuRobo Pose without Pose.from_matrix."""
+    if mat4x4.shape[-2:] != (4, 4):
+        raise ValueError(f"Expected transform shape (..., 4, 4), got {mat4x4.shape}")
+
+    if detach:
+        mat4x4 = mat4x4.detach()
+
+    position = mat4x4[..., :3, 3]
+    quat_xyzw = roma.rotmat_to_unitquat(mat4x4[..., :3, :3])
+    quat_wxyz = torch.cat([quat_xyzw[..., 3:4], quat_xyzw[..., :3]], dim=-1)
+    return Pose(position=position, quaternion=quat_wxyz, normalize_rotation=True)
 
 
 def transform_spheres(

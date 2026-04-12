@@ -89,11 +89,12 @@ sudo apt install git-lfs
 git lfs install
 ```
 
-Then clone and install cuRobo:
+Then clone and install the TiPToP-compatible cuRobo fork:
 
 ```bash
-git clone --branch v0.7.6 https://github.com/NVlabs/curobo.git
+git clone https://github.com/williamshen-nz/curobo.git
 cd curobo
+git checkout b5fad1df2a3ac4d3e33e369918b7d62d0e59ebd1
 
 # This can take up to 20 minutes to install
 pip install -e . --no-build-isolation
@@ -273,6 +274,45 @@ You can try installing `GLIBCXX` via conda:
 ```bash
 conda install -c conda-forge libstdcxx-ng -y
 ```
+
+### `Failed to find backward kernel 'compute_matrix_to_quat'`
+
+If you see an error like this during `loss.backward()`:
+
+```text
+RuntimeError: Failed to find backward kernel 'compute_matrix_to_quat' from module 'curobo.geom.transform'
+```
+
+the most common cause is a runtime mismatch where cuRobo is imported from one environment while Warp is imported
+from another provider (for example Isaac Sim's `omni.warp.core` extension path).
+
+First, check what is actually imported at runtime:
+
+```bash
+python - <<'PY'
+import os
+import warp
+import curobo
+
+print("warp.__version__:", getattr(warp, "__version__", "unknown"))
+print("warp.__file__:", warp.__file__)
+print("curobo.__file__:", curobo.__file__)
+print("CUROBO_WARP_RUNTIME_KERNEL_DISABLE:", os.getenv("CUROBO_WARP_RUNTIME_KERNEL_DISABLE"))
+PY
+```
+
+If `warp.__file__` points to an Isaac Sim extension path while cuRobo comes from your venv, use one consistent
+Python environment/provider for both packages and reinstall:
+
+```bash
+unset CUROBO_WARP_RUNTIME_KERNEL_DISABLE
+pip uninstall -y nvidia-curobo warp-lang
+pip install -e . --no-build-isolation
+rm -rf ~/.cache/warp ~/.cache/curobo
+```
+
+After reinstalling, rerun the check above and confirm `warp.__file__` and `curobo.__file__` both point into the same
+venv before launching cuTAMP.
 
 ### cuTAMP can't find any satisfying particles for my new domain
 
