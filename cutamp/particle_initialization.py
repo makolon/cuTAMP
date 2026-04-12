@@ -8,6 +8,7 @@
 # its affiliates is strictly prohibited.
 
 import logging
+from collections.abc import Mapping
 from typing import Optional
 
 import roma
@@ -22,6 +23,12 @@ from cutamp.samplers import (
     grasp_6dof_sampler,
     place_4dof_sampler,
     sample_yaw,
+)
+from cutamp.stream_initializers import (
+    get_stream_payload,
+    grasp_payload_to_actions,
+    placement_payload_to_actions,
+    sample_initializer_indices,
 )
 from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick
 from cutamp.tamp_world import TAMPWorld
@@ -40,7 +47,12 @@ _log = logging.getLogger(__name__)
 
 
 class ParticleInitializer:
-    def __init__(self, world: TAMPWorld, config: TAMPConfiguration):
+    def __init__(
+        self,
+        world: TAMPWorld,
+        config: TAMPConfiguration,
+        stream_initializers: Optional[Mapping[str, object]] = None,
+    ):
         if config.enable_traj:
             raise NotImplementedError("Trajectory initialization not yet supported")
         if config.place_dof != 4:
@@ -50,6 +62,8 @@ class ParticleInitializer:
         self.world = world
         self.config = config
         self.q_init = world.q_init.repeat(config.num_particles, 1)
+        self.grasp_streams = get_stream_payload(stream_initializers, "grasp")
+        self.place_streams = get_stream_payload(stream_initializers, "place")
 
         # Sampler caching
         self.pick_cache = {}
@@ -115,6 +129,38 @@ class ParticleInitializer:
                     )
                     continue
 
+                stream_payload = self.grasp_streams.get(obj)
+                if isinstance(stream_payload, Mapping):
+                    grasps_obj = stream_payload.get("grasps_obj")
+                    confidences_pt = stream_payload.get("confidences_pt")
+                    if isinstance(grasps_obj, torch.Tensor) and grasps_obj.shape[0] > 0:
+                        grasp_actions, grasp_transforms = grasp_payload_to_actions(grasps_obj, config.grasp_dof)
+                        indices = sample_initializer_indices(
+                            grasp_actions.shape[0],
+                            num_particles,
+                            device=grasp_actions.device,
+                            scores=confidences_pt if isinstance(confidences_pt, torch.Tensor) else None,
+                        )
+                        particles[grasp] = grasp_actions[indices].clone()
+                        grasp_transforms = grasp_transforms[indices]
+
+                        world_from_obj = pose_list_to_mat4x4(world.get_object(obj).pose).to(world.tensor_args.device)
+                        world_from_grasp = world_from_obj @ grasp_transforms
+                        world_from_ee = world_from_grasp @ world.tool_from_ee
+
+                        world_from_ee = Pose.from_matrix(world_from_ee)
+                        ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)
+                        log_debug(
+                            f"{header}. External grasp IK success: "
+                            f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                        )
+                        particles[q] = ik_result.solution[:, 0]
+                        deferred_params.remove(q)
+
+                        if config.cache_subgraphs:
+                            self.pick_cache[obj] = {"sampled_grasps": particles[grasp], "ik_result": ik_result}
+                        continue
+
                 # Sample grasps
                 obj_curobo = world.get_object(obj)
                 obj_spheres = world.get_collision_spheres(obj)
@@ -154,7 +200,7 @@ class ParticleInitializer:
                 deferred_params.remove(q)
 
                 # Store in cache
-                if config.cache_subgraphs:
+                if config.cache_subgraphs and not config.random_init:
                     self.pick_cache[obj] = {"sampled_grasps": particles[grasp], "ik_result": ik_result}
 
             # Place
@@ -188,6 +234,51 @@ class ParticleInitializer:
                         f"{header}. Using cached placement poses for {obj}. {ik_result.success.sum()}/{num_particles} success"
                     )
                     continue
+
+                obj_place_streams = self.place_streams.get(obj)
+                if isinstance(obj_place_streams, Mapping):
+                    stream_payload = obj_place_streams.get(surface)
+                    if isinstance(stream_payload, Mapping):
+                        placements_world = stream_payload.get("placements_world")
+                        support_scores_pt = stream_payload.get("support_scores_pt")
+                        if isinstance(placements_world, torch.Tensor) and placements_world.shape[0] > 0:
+                            sampled_placements, world_from_obj = placement_payload_to_actions(placements_world)
+                            indices = sample_initializer_indices(
+                                sampled_placements.shape[0],
+                                num_particles,
+                                device=sampled_placements.device,
+                                scores=support_scores_pt if isinstance(support_scores_pt, torch.Tensor) else None,
+                            )
+                            sampled_placements = sampled_placements[indices].clone()
+                            world_from_obj = world_from_obj[indices]
+                            particles[placement] = sampled_placements
+
+                            if config.random_init:
+                                q_sample = sample_between_bounds(num_particles, world.robot_container.joint_limits)
+                                particles[q] = q_sample
+                            else:
+                                if config.grasp_dof == 4:
+                                    obj_from_grasp = action_4dof_to_mat4x4(particles[grasp])
+                                else:
+                                    obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
+                                world_from_grasp = world_from_obj @ obj_from_grasp
+                                world_from_ee = world_from_grasp @ world.tool_from_ee
+                                world_from_ee = Pose.from_matrix(world_from_ee)
+                                ik_result = world.ik_solver.solve_batch(world_from_ee, seed_config=None)
+                                log_debug(
+                                    f"{header}. External place IK success: "
+                                    f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                                )
+                                particles[q] = ik_result.solution[:, 0]
+                            deferred_params.remove(q)
+
+                            if config.cache_subgraphs and not config.random_init:
+                                self.place_cache[(obj, surface)] = {
+                                    "sampled_placements": sampled_placements,
+                                    "ik_result": ik_result,
+                                    "grasp": particles[grasp],
+                                }
+                            continue
 
                 # Sample placements pose of object (in world frame)
                 obj_curobo = world.get_object(obj)
@@ -236,7 +327,7 @@ class ParticleInitializer:
                 deferred_params.remove(q)
 
                 # Store in cache
-                if config.cache_subgraphs:
+                if config.cache_subgraphs and not config.random_init:
                     self.place_cache[(obj, surface)] = {
                         "sampled_placements": sampled_placements,
                         "ik_result": ik_result,

@@ -11,6 +11,7 @@
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import List, Union, Optional, Tuple
 from unittest.mock import Mock
 
@@ -236,11 +237,16 @@ def setup_cutamp(
     config: TAMPConfiguration,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
+    experiment_dir: Optional[str | Path] = None,
 ):
     # Validate args and setup experiment logger
     validate_tamp_config(config)
     if experiment_id is None:
         experiment_id = datetime.now().isoformat().split(".")[0]
+
+    if experiment_dir is not None:
+        config = TAMPConfiguration(**{**config.__dict__, "experiment_root": str(Path(experiment_dir).parent)})
+        experiment_id = Path(experiment_dir).name
 
     exp_logger = ExperimentLogger(name=experiment_id, config=config) if config.enable_experiment_logging else Mock()
     exp_logger.save_env(env)
@@ -292,11 +298,13 @@ def run_cutamp(
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
+    stream_initializers: Optional[dict[str, object]] = None,
+    experiment_dir: Optional[str | Path] = None,
 ):
     """Overall cuTAMP algorithm implementation."""
     # Setup all the things and load the world
-    exp_logger, visualizer, timer, world = setup_cutamp(env, config, q_init, experiment_id)
-    particle_initializer = ParticleInitializer(world, config)
+    exp_logger, visualizer, timer, world = setup_cutamp(env, config, q_init, experiment_id, experiment_dir)
+    particle_initializer = ParticleInitializer(world, config, stream_initializers=stream_initializers)
 
     # Task plan generator
     _log.info(f"Initial State: {world.initial_state}")
@@ -352,6 +360,7 @@ def run_cutamp(
         "best_soft_cost": float("inf"),
     }
     curobo_plan = None
+    failure_reason = None
     found_solution = False
     particle_optimizer = ParticleOptimizer(config, cost_reducer, constraint_checker)
     timer.start("first_solution")
@@ -496,14 +505,18 @@ def run_cutamp(
         if has_satisfying:
             found_solution = True
             if config.curobo_plan:
-                curobo_plan = solve_curobo(
-                    plan_info,
-                    best_particle,
-                    world,
-                    config,
-                    timer,
-                    visualizer,
-                )
+                try:
+                    curobo_plan = solve_curobo(
+                        plan_info,
+                        best_particle,
+                        world,
+                        config,
+                        timer,
+                        visualizer,
+                    )
+                except Exception as exc:  # pragma: no cover - integration failure path
+                    failure_reason = str(exc)
+                    _log.exception("Motion planning failed for satisfying cuTAMP particle")
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
             _log.debug(f"Total num satisfying {metrics['num_satisfying_final']}")
@@ -524,6 +537,7 @@ def run_cutamp(
     _log.debug(f"Optimization loop took roughly {opt_elapsed:.2f}s")
     if not found_solution:
         _log.warning("No satisfying particles found after optimizing all plans")
+        failure_reason = "No satisfying particles found after optimizing all plan skeletons."
     _log.debug(f"Best cost: {overall_metrics['best_cost']:.4f}, soft cost: {overall_metrics['best_soft_cost']:.4f}")
 
     # Dump metrics out
@@ -534,4 +548,4 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, overall_metrics["num_satisfying_final"]
+    return curobo_plan, overall_metrics["num_satisfying_final"], failure_reason
