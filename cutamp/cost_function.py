@@ -307,6 +307,15 @@ class CostFunction:
                 sph_idxs = [o_idx] * num_spheres
                 sphere_idx_map.extend(sph_idxs)
             sphere_idx_map = torch.tensor(sphere_idx_map, dtype=torch.int64, device=self.world.device)
+
+            # Stable placement requires at least one collision sphere per object.
+            if sphere_idx_map.numel() == 0:
+                raise RuntimeError(f"No collision spheres found for objects on placement surface {surface}")
+            sphere_counts = torch.bincount(sphere_idx_map, minlength=len(objs))
+            if (sphere_counts == 0).any():
+                missing = [obj_name for obj_name, count in zip(objs, sphere_counts.tolist()) if count == 0]
+                raise RuntimeError(f"Missing collision spheres for stable placement objects: {missing}")
+
             sphere_idx_map_expand = sphere_idx_map[None].expand(num_particles, -1)  # expand by batch size
 
             # Since objects can have different numbers of spheres, we need to concatenate instead of stack
@@ -321,10 +330,8 @@ class CostFunction:
 
             # Distance between bottom of spheres and z-position of the surface
             spheres_bottom = spheres[..., 2] - spheres[..., 3]
-            obj_bottom = torch.full(
-                (num_particles, len(objs)), float("inf"), dtype=spheres_bottom.dtype, device=spheres_bottom.device
-            )
-            obj_bottom.scatter_reduce_(1, sphere_idx_map_expand, spheres_bottom, reduce="amin")
+            obj_bottom = torch.zeros((num_particles, len(objs)), dtype=spheres_bottom.dtype, device=spheres_bottom.device)
+            obj_bottom.scatter_reduce_(1, sphere_idx_map_expand, spheres_bottom, reduce="amin", include_self=False)
             target_z = self.surface_to_target_z[surface]
             support_vals[f"{surface}_support"] = torch.abs(obj_bottom - target_z)
 
