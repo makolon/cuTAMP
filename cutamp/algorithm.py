@@ -314,9 +314,6 @@ def run_cutamp(
 ):
     """Overall cuTAMP algorithm implementation."""
     # Setup all the things and load the world
-    ik_solver = _find_first_stream_resource(stream_initializers, (("solve_batch",), ("solve",)))
-    motion_gen = _find_first_stream_resource(stream_initializers, (("plan_single",), ("plan",)))
-
     exp_logger, visualizer, timer, world = setup_cutamp(
         env,
         config,
@@ -531,7 +528,6 @@ def run_cutamp(
                     timer,
                     visualizer,
                     obj_to_initial_pose=obj_to_initial_pose,
-                    motion_gen=motion_gen,
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
