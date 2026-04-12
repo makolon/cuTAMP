@@ -250,6 +250,8 @@ class ParticleOptimizer:
                 gripper_joints = [0.4] if gripper_close else [0.0]
             elif self.config.robot == "panda":
                 gripper_joints = [0.01, 0.01] if gripper_close else [0.04, 0.04]
+            elif self.config.robot == "xarm7":
+                gripper_joints = [0.0] if gripper_close else [0.85]
             else:
                 gripper_joints = []
             visualizer.set_joint_positions(q.tolist() + gripper_joints)

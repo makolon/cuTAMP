@@ -200,6 +200,9 @@ def solve_curobo(
                 end_val = 0.4
                 interp = torch.linspace(0.0, end_val, 20)
                 interp = interp[:, None]
+            elif config.robot == "xarm7":
+                end_val = 0.0
+                interp = torch.linspace(0.85, end_val, 20)[:, None]
             else:
                 end_val = 0.02
                 interp = torch.linspace(0.04, end_val, 20)[:, None]
@@ -293,6 +296,9 @@ def solve_curobo(
                 end_val = 0.0
                 interp = torch.linspace(0.4, end_val, 20)
                 interp = interp[:, None]
+            elif config.robot == "xarm7":
+                end_val = 0.85
+                interp = torch.linspace(0.0, end_val, 20)[:, None]
             else:
                 end_val = 0.04
                 interp = torch.linspace(0.02, end_val, 20)[:, None]

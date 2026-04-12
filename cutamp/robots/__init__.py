@@ -25,6 +25,12 @@ from .franka import (
     load_franka_rerun,
 )
 from .ur5 import load_ur5_rerun, ur5_home, get_ur5_gripper_spheres, get_ur5_ik_solver, get_ur5_kinematics_model
+from .xarm7 import (
+    get_xarm7_gripper_spheres,
+    get_xarm7_kinematics_model,
+    load_xarm7_rerun,
+    xarm7_home,
+)
 from .utils import RerunRobot
 
 
@@ -67,6 +73,16 @@ def load_ur5_container(tensor_args: TensorDeviceType) -> RobotContainer:
     return RobotContainer("ur5", kin_model, joint_limits, gripper_spheres, tool_from_ee)
 
 
+def load_xarm7_container(tensor_args: TensorDeviceType) -> RobotContainer:
+    kin_model = get_xarm7_kinematics_model()
+    joint_limits = kin_model.kinematics_config.joint_limits.position
+    assert joint_limits.shape == (2, 7), f"Invalid joint limits shape: {joint_limits.shape}"
+
+    gripper_spheres = get_xarm7_gripper_spheres(tensor_args)
+    tool_from_ee = torch.eye(4, device=tensor_args.device)
+    return RobotContainer("xarm7", kin_model, joint_limits, gripper_spheres, tool_from_ee)
+
+
 robot_to_fns = {
     "panda": {
         "rerun": load_franka_rerun,
@@ -77,6 +93,11 @@ robot_to_fns = {
         "rerun": load_ur5_rerun,
         "q_home": ur5_home[:6],
         "container": load_ur5_container,
+    },
+    "xarm7": {
+        "rerun": load_xarm7_rerun,
+        "q_home": xarm7_home[:7],
+        "container": load_xarm7_container,
     },
 }
 
