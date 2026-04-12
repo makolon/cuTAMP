@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Iterator
 
 import torch
 from jaxtyping import Float
@@ -15,7 +15,7 @@ def as_mapping(value: object) -> dict[str, object]:
     return {}
 
 
-def get_stream_payload(stream_initializers: Mapping[str, object] | None, stream_name: str) -> dict[str, object]:
+def get_stream_data(stream_initializers: Mapping[str, object] | None, stream_name: str) -> dict[str, object]:
     if stream_initializers is None:
         return {}
     return as_mapping(stream_initializers.get(stream_name))
@@ -48,7 +48,7 @@ def sample_initializer_indices(
     return torch.multinomial(weights, num_samples=num_particles, replacement=replacement)
 
 
-def grasp_payload_to_actions(
+def grasp_data_to_actions(
     grasps_obj: Float[torch.Tensor, "n 4 4"],
     grasp_dof: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -64,14 +64,14 @@ def grasp_payload_to_actions(
     if grasp_dof == 6:
         translation = grasps_obj[:, :3, 3]
         rotation = grasps_obj[:, :3, :3]
-        rpy = _rotmat_to_euler_xyz(rotation)
+        rpy = rotmat_to_euler_xyz(rotation)
         actions = torch.cat([translation, rpy], dim=1)
         return actions, action_6dof_to_mat4x4(actions)
 
     raise ValueError(f"Unsupported grasp_dof: {grasp_dof}")
 
 
-def placement_payload_to_actions(placements_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def placement_data_to_actions(placements_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if placements_world.ndim == 2 and placements_world.shape[-1] == 4:
         return placements_world, action_4dof_to_mat4x4(placements_world)
 
@@ -87,7 +87,7 @@ def placement_payload_to_actions(placements_world: torch.Tensor) -> tuple[torch.
     )
 
 
-def _rotmat_to_euler_xyz(rotation: Float[torch.Tensor, "n 3 3"]) -> Float[torch.Tensor, "n 3"]:
+def rotmat_to_euler_xyz(rotation: Float[torch.Tensor, "n 3 3"]) -> Float[torch.Tensor, "n 3"]:
     sy = torch.sqrt(rotation[:, 0, 0] ** 2 + rotation[:, 1, 0] ** 2)
     singular = sy < 1e-6
 
@@ -103,5 +103,51 @@ def _rotmat_to_euler_xyz(rotation: Float[torch.Tensor, "n 3 3"]) -> Float[torch.
     return torch.stack([roll, pitch, yaw], dim=1)
 
 
-def get_runtime_payload(stream_initializers: Mapping[str, object] | None) -> dict[str, Any]:
-    return get_stream_payload(stream_initializers, "runtime")
+def iter_stream_objects(stream_initializers: Mapping[str, object] | None) -> Iterator[object]:
+    if stream_initializers is None:
+        return
+
+    seen: set[int] = set()
+
+    def walk(value: object) -> Iterator[object]:
+        if value is None:
+            return
+
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+        yield value
+
+        if isinstance(value, Mapping):
+            for item in value.values():
+                yield from walk(item)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                yield from walk(item)
+            return
+
+        attrs = getattr(value, "__dict__", None)
+        if attrs is not None and isinstance(attrs, dict):
+            for item in attrs.values():
+                yield from walk(item)
+
+    runtime_data = get_stream_data(stream_initializers, "runtime")
+    if runtime_data:
+        yield from walk(runtime_data)
+    yield from walk(stream_initializers)
+
+
+def find_stream_resource_by_methods(
+    stream_initializers: Mapping[str, object] | None,
+    required_methods: tuple[str, ...],
+) -> object | None:
+    if not required_methods:
+        raise ValueError("required_methods must not be empty")
+
+    for candidate in iter_stream_objects(stream_initializers):
+        if all(callable(getattr(candidate, method_name, None)) for method_name in required_methods):
+            return candidate
+    return None

@@ -10,8 +10,10 @@
 """Core cuTAMP algorithm implementation."""
 
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import List, Union, Optional, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 from unittest.mock import Mock
 
 import torch
@@ -28,6 +30,7 @@ from cutamp.optimize_plan import ParticleOptimizer
 from cutamp.particle_initialization import ParticleInitializer
 from cutamp.robots import get_q_home, load_robot_container
 from cutamp.rollout import RolloutFunction
+from cutamp.stream_initializers import find_stream_resource_by_methods
 from cutamp.tamp_domain import all_tamp_operators
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
@@ -237,13 +240,20 @@ def setup_cutamp(
     config: TAMPConfiguration,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
+    experiment_dir: Optional[Union[Path, str]] = None,
 ):
     # Validate args and setup experiment logger
     validate_tamp_config(config)
     if experiment_id is None:
         experiment_id = datetime.now().isoformat().split(".")[0]
+    if isinstance(experiment_dir, str):
+        experiment_dir = Path(experiment_dir)
 
-    exp_logger = ExperimentLogger(name=experiment_id, config=config) if config.enable_experiment_logging else Mock()
+    exp_logger = (
+        ExperimentLogger(name=experiment_id, config=config, experiment_dir=experiment_dir)
+        if config.enable_experiment_logging
+        else Mock()
+    )
     exp_logger.save_env(env)
 
     # Loading robot can be done offline, so doesn't count towards timing
@@ -281,6 +291,17 @@ def setup_cutamp(
     return exp_logger, visualizer, timer, world
 
 
+def _find_first_stream_resource(
+    stream_initializers: Optional[Mapping[str, object]],
+    method_candidates: Sequence[tuple[str, ...]],
+) -> Optional[object]:
+    for required_methods in method_candidates:
+        candidate = find_stream_resource_by_methods(stream_initializers, required_methods)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def run_cutamp(
     env: TAMPEnvironment,
     config: TAMPConfiguration,
@@ -288,11 +309,23 @@ def run_cutamp(
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
+    stream_initializers: Optional[Mapping[str, object]] = None,
+    experiment_dir: Optional[Union[Path, str]] = None,
 ):
     """Overall cuTAMP algorithm implementation."""
     # Setup all the things and load the world
-    exp_logger, visualizer, timer, world = setup_cutamp(env, config, q_init, experiment_id)
-    particle_initializer = ParticleInitializer(world, config)
+    ik_solver = _find_first_stream_resource(stream_initializers, (("solve_batch",), ("solve",)))
+    motion_gen = _find_first_stream_resource(stream_initializers, (("plan_single",), ("plan",)))
+
+    exp_logger, visualizer, timer, world = setup_cutamp(
+        env,
+        config,
+        q_init=q_init,
+        experiment_id=experiment_id,
+        experiment_dir=experiment_dir,
+    )
+    particle_initializer = ParticleInitializer(world, config, stream_initializers=stream_initializers)
+    obj_to_initial_pose = {obj.name: world.get_object_pose(obj).clone() for obj in world.movables}
 
     # Task plan generator
     _log.info(f"Initial State: {world.initial_state}")
@@ -497,6 +530,8 @@ def run_cutamp(
                     config,
                     timer,
                     visualizer,
+                    obj_to_initial_pose=obj_to_initial_pose,
+                    motion_gen=motion_gen,
                 )
             overall_metrics["num_satisfying_final"] = metrics["num_satisfying_final"]
             overall_metrics["final_plan_skeleton"] = [str(op) for op in plan_skeleton]
@@ -528,4 +563,10 @@ def run_cutamp(
     # Log constraint and cost multipliers
     exp_logger.log_dict("multipliers", cost_reducer.cost_config)
     exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
-    return curobo_plan, overall_metrics["num_satisfying_final"]
+
+    failure_reason = None
+    if not found_solution:
+        failure_reason = "no_satisfying_particles"
+    elif config.curobo_plan and curobo_plan is None:
+        failure_reason = "motion_planning_failed"
+    return curobo_plan, overall_metrics["num_satisfying_final"], failure_reason

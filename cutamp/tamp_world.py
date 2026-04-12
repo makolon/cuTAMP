@@ -10,7 +10,7 @@
 import logging
 import warnings
 from functools import cached_property
-from typing import List, Literal, Dict, Union
+from typing import Dict, List, Literal, Union
 
 import torch
 from jaxtyping import Float
@@ -183,7 +183,12 @@ class TAMPWorld:
         """Warmup cuRobo IK solver."""
         q = sample_between_bounds(num_particles, bounds=self.robot_container.joint_limits)
         goal_pose = self.kin_model.get_state(q).ee_pose
-        _ = self.ik_solver.solve_batch(goal_pose)
+        if callable(getattr(self.ik_solver, "solve_batch", None)):
+            _ = self.ik_solver.solve_batch(goal_pose)
+        elif callable(getattr(self.ik_solver, "solve", None)):
+            _ = self.ik_solver.solve(goal_pose)
+        else:
+            raise ValueError("ik_solver must define either solve_batch or solve")
 
     def get_motion_gen(self, collision_activation_distance: float, use_cuda_graph: bool = True) -> MotionGen:
         """
@@ -225,5 +230,3 @@ def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
             raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
-
-    # TODO: catch collisions between spheres for each movable objects here

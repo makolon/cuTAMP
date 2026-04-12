@@ -25,9 +25,9 @@ from cutamp.samplers import (
     sample_yaw,
 )
 from cutamp.stream_initializers import (
-    get_stream_payload,
-    grasp_payload_to_actions,
-    placement_payload_to_actions,
+    get_stream_data,
+    grasp_data_to_actions,
+    placement_data_to_actions,
     sample_initializer_indices,
 )
 from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick
@@ -62,8 +62,8 @@ class ParticleInitializer:
         self.world = world
         self.config = config
         self.q_init = world.q_init.repeat(config.num_particles, 1)
-        self.grasp_streams = get_stream_payload(stream_initializers, "grasp")
-        self.place_streams = get_stream_payload(stream_initializers, "place")
+        self.grasp_streams = get_stream_data(stream_initializers, "grasp")
+        self.place_streams = get_stream_data(stream_initializers, "place")
 
         # Sampler caching
         self.pick_cache = {}
@@ -129,12 +129,12 @@ class ParticleInitializer:
                     )
                     continue
 
-                stream_payload = self.grasp_streams.get(obj)
-                if isinstance(stream_payload, Mapping):
-                    grasps_obj = stream_payload.get("grasps_obj")
-                    confidences_pt = stream_payload.get("confidences_pt")
+                stream_data = self.grasp_streams.get(obj)
+                if isinstance(stream_data, Mapping):
+                    grasps_obj = stream_data.get("grasps_obj")
+                    confidences_pt = stream_data.get("confidences_pt")
                     if isinstance(grasps_obj, torch.Tensor) and grasps_obj.shape[0] > 0:
-                        grasp_actions, grasp_transforms = grasp_payload_to_actions(grasps_obj, config.grasp_dof)
+                        grasp_actions, grasp_transforms = grasp_data_to_actions(grasps_obj, config.grasp_dof)
                         indices = sample_initializer_indices(
                             grasp_actions.shape[0],
                             num_particles,
@@ -235,12 +235,12 @@ class ParticleInitializer:
 
                 obj_place_streams = self.place_streams.get(obj)
                 if isinstance(obj_place_streams, Mapping):
-                    stream_payload = obj_place_streams.get(surface)
-                    if isinstance(stream_payload, Mapping):
-                        placements_world = stream_payload.get("placements_world")
-                        support_scores_pt = stream_payload.get("support_scores_pt")
+                    stream_data = obj_place_streams.get(surface)
+                    if isinstance(stream_data, Mapping):
+                        placements_world = stream_data.get("placements_world")
+                        support_scores_pt = stream_data.get("support_scores_pt")
                         if isinstance(placements_world, torch.Tensor) and placements_world.shape[0] > 0:
-                            sampled_placements, world_from_obj = placement_payload_to_actions(placements_world)
+                            sampled_placements, world_from_obj = placement_data_to_actions(placements_world)
                             indices = sample_initializer_indices(
                                 sampled_placements.shape[0],
                                 num_particles,

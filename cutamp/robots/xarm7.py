@@ -31,12 +31,8 @@ def xarm7_curobo_cfg() -> dict:
     return load_yaml(join_path(get_robot_configs_path(), "xarm7.yml"))
 
 
-def _xarm7_cfg_dict() -> dict:
-    return xarm7_curobo_cfg()["robot_cfg"]
-
-
 def get_xarm7_kinematics_model() -> CudaRobotModel:
-    robot_cfg = RobotConfig.from_dict(_xarm7_cfg_dict())
+    robot_cfg = RobotConfig.from_dict(xarm7_curobo_cfg()["robot_cfg"])
     return CudaRobotModel(robot_cfg.kinematics)
 
 
@@ -47,7 +43,7 @@ def get_xarm7_ik_solver(
     self_collision_check: bool = True,
     use_particle_opt: bool = False,
 ) -> IKSolver:
-    robot_cfg = _xarm7_cfg_dict()
+    robot_cfg = xarm7_curobo_cfg()["robot_cfg"]
     ik_config = IKSolverConfig.load_from_robot_config(
         robot_cfg,
         world_cfg,
@@ -94,7 +90,7 @@ def get_xarm7_gripper_spheres(tensor_args: TensorDeviceType = TensorDeviceType()
 
 
 def load_xarm7_rerun(load_mesh: bool = True) -> RerunRobot:
-    robot_cfg = _xarm7_cfg_dict()
+    robot_cfg = xarm7_curobo_cfg()["robot_cfg"]
     urdf_rel_path = robot_cfg["kinematics"]["urdf_path"]
     external_asset_path = robot_cfg["kinematics"].get("external_asset_path", "")
     urdf_path = os.path.join(external_asset_path, urdf_rel_path) or join_path(get_assets_path(), urdf_rel_path)
