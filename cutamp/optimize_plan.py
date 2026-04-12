@@ -47,9 +47,10 @@ class ParticleOptimizer:
         self.constraint_checker = constraint_checker
         self.get_satisfying_mask = self.constraint_checker.get_mask
 
+        self.prop_satisfying_break = getattr(self.config, "prop_satisfying_break", None)
         self.num_satisfying_break = (
-            int(self.config.prop_satisfying_break * self.config.num_particles)
-            if self.config.prop_satisfying_break is not None
+            int(self.prop_satisfying_break * self.config.num_particles)
+            if self.prop_satisfying_break is not None
             else None
         )
 
@@ -172,7 +173,7 @@ class ParticleOptimizer:
             # If num satisfying bigger than desired proportion, break
             if self.num_satisfying_break is not None and num_satisfying >= self.num_satisfying_break:
                 _log.info(
-                    f"Found {num_satisfying} >= {self.num_satisfying_break} ({self.config.prop_satisfying_break * 100:.2f}%) satisfying particles "
+                    f"Found {num_satisfying} >= {self.num_satisfying_break} ({self.prop_satisfying_break * 100:.2f}%) satisfying particles "
                 )
                 break
 
