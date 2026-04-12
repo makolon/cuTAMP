@@ -538,13 +538,6 @@ def run_cutamp(
         if should_break:
             break
 
-        # TODO: complete version of our algorithm that adds additional skeletons to the queue, resorts, revisits
-        #  skeletons, etc.
-        # new_plan_info = sample_plan_skeleton()
-        # if new_plan_info is not None:
-        #     plan_queue.append(new_plan_info)
-        #     sort_plans()
-
     opt_elapsed = timer.stop("start_optimization")
     _log.debug(f"Optimization loop took roughly {opt_elapsed:.2f}s")
     if not found_solution:

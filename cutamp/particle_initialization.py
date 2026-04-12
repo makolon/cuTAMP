@@ -62,6 +62,8 @@ class ParticleInitializer:
         self.world = world
         self.config = config
         self.q_init = world.q_init.repeat(config.num_particles, 1)
+
+        # Load stream initializer data
         self.grasp_streams = get_stream_data(stream_initializers, "grasp")
         self.place_streams = get_stream_data(stream_initializers, "place")
 
