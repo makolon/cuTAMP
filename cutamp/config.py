@@ -17,14 +17,11 @@ class TAMPConfiguration:
     num_particles: int = 1024
 
     # Robot embodiment to use
-    robot: Literal["panda", "ur5", "xarm7"] = "panda"
+    robot: Literal["panda", "ur5", "xarm7"] = "xarm7"
 
     # Grasp and Placements
-    grasp_dof: Literal[4, 6] = 4
+    grasp_dof: Literal[4, 6] = 6
     place_dof: Literal[4] = 4
-
-    # M2T2 Grasps which will be used first, and then grasp_dof fallback
-    m2t2_grasps: bool = False
 
     # Approach to use. Note: optimization includes particle initialization (i.e., sampling)
     approach: Literal["optimization", "sampling"] = "optimization"
