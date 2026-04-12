@@ -94,6 +94,39 @@ def mat4x4_to_pose(mat4x4: Float[torch.Tensor, "*b 4 4"], detach: bool = False) 
     return Pose(position=position, quaternion=quat_wxyz, normalize_rotation=True)
 
 
+def quaternion_wxyz_to_rotmat_safe(
+    quaternion_wxyz: Float[torch.Tensor, "*b 4"], eps: float = 1e-12
+) -> Float[torch.Tensor, "*b 3 3"]:
+    """Convert wxyz quaternions to rotation matrices with safe normalization."""
+    if quaternion_wxyz.shape[-1] != 4:
+        raise ValueError(f"Expected quaternion shape (..., 4), got {quaternion_wxyz.shape}")
+
+    quat_norm = torch.linalg.norm(quaternion_wxyz, dim=-1, keepdim=True)
+    quat = quaternion_wxyz / torch.clamp(quat_norm, min=eps)
+    w, x, y, z = quat.unbind(dim=-1)
+
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+
+    row0 = torch.stack((1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)), dim=-1)
+    row1 = torch.stack((2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)), dim=-1)
+    row2 = torch.stack((2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)), dim=-1)
+    rotation = torch.stack((row0, row1, row2), dim=-2)
+
+    degenerate = quat_norm[..., 0] < eps
+    if degenerate.any():
+        eye = torch.eye(3, dtype=rotation.dtype, device=rotation.device)
+        rotation = torch.where(degenerate[..., None, None], eye, rotation)
+    return rotation
+
+
 def pose_wxyz_to_mat4x4(
     position: Float[torch.Tensor, "*b 3"], quaternion_wxyz: Float[torch.Tensor, "*b 4"]
 ) -> Float[torch.Tensor, "*b 4 4"]:
@@ -103,8 +136,7 @@ def pose_wxyz_to_mat4x4(
             f"Expected matching batch dimensions for position and quaternion, got {position.shape} and {quaternion_wxyz.shape}"
         )
 
-    quat_xyzw = quat_wxyz_to_xyzw(quaternion_wxyz)
-    rotation = unitquat_to_rotmat(quat_xyzw)
+    rotation = quaternion_wxyz_to_rotmat_safe(quaternion_wxyz)
 
     mat4x4 = torch.zeros(*position.shape[:-1], 4, 4, device=position.device, dtype=position.dtype)
     mat4x4[..., :3, :3] = rotation.to(dtype=position.dtype)

@@ -141,6 +141,10 @@ class ParticleOptimizer:
             rollout = rollout_fn(particles)
             cost_dict = cost_fn(rollout)
             costs = self.cost_reducer(cost_dict, consider_types=consider_types)
+            if not torch.isfinite(costs).all():
+                num_non_finite = (~torch.isfinite(costs)).sum().item()
+                _log.warning(f"Detected {num_non_finite} non-finite particle costs at step {step}; sanitizing values")
+                costs = torch.nan_to_num(costs, nan=1e6, posinf=1e6, neginf=1e6)
             satisfying_mask = self.get_satisfying_mask(cost_dict, verbose=False)
             num_satisfying = satisfying_mask.sum().item()
             opt_metrics["num_satisfying"].append(num_satisfying)

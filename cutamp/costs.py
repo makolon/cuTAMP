@@ -139,12 +139,15 @@ def curobo_pose_error(
     pos_a = pose_a_mat4x4[..., :3, 3]
     pos_b = pose_b_mat4x4[..., :3, 3]
     p_dist = torch.linalg.norm(pos_a - pos_b, dim=-1)
+    p_dist = torch.nan_to_num(p_dist, nan=1e6, posinf=1e6, neginf=1e6)
 
     rot_a = pose_a_mat4x4[..., :3, :3]
     rot_b = pose_b_mat4x4[..., :3, :3]
     rel_rot = rot_a @ rot_b.transpose(-1, -2)
     trace = rel_rot[..., 0, 0] + rel_rot[..., 1, 1] + rel_rot[..., 2, 2]
-    quat_dist = torch.sqrt(torch.clamp((3.0 - trace) * 0.25, min=0.0))
+    quat_term = torch.clamp((3.0 - trace) * 0.25, min=0.0)
+    quat_term = torch.nan_to_num(quat_term, nan=0.0, posinf=1e6, neginf=0.0)
+    quat_dist = torch.sqrt(quat_term)
 
     assert p_dist.shape == quat_dist.shape
     return p_dist, quat_dist
