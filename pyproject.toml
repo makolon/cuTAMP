@@ -38,7 +38,6 @@ dependencies = [
     "flash-linear-attention>=0.4.2",
     "transformers==5.4.0",
     # Third-party integrations
-    "causal-conv1d",
     "nvidia-curobo",
 ]
 
@@ -72,7 +71,6 @@ torch = { index = "torch" }
 torchvision = { index = "torch" }
 
 # Git sources
-causal-conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git" }
 nvidia-curobo = { git = "https://github.com/williamshen-nz/curobo.git" }
 
 [[tool.uv.index]]
