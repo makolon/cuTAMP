@@ -39,7 +39,7 @@ dependencies = [
     "transformers==5.4.0",
     # Third-party integrations
     "causal-conv1d",
-    "curobo",
+    "nvidia-curobo",
 ]
 
 [project.optional-dependencies]
@@ -73,7 +73,7 @@ torchvision = { index = "torch" }
 
 # Git sources
 causal-conv1d = { git = "https://github.com/Dao-AILab/causal-conv1d.git" }
-curobo = { git = "https://github.com/williamshen-nz/curobo.git" }
+nvidia-curobo = { git = "https://github.com/williamshen-nz/curobo.git" }
 
 [[tool.uv.index]]
 explicit = true
