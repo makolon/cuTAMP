@@ -35,7 +35,6 @@ dependencies = [
     "torchaudio==2.7.0",
     "torchvision==0.22.0",
     # VLM stacks
-    "flash-linear-attention>=0.4.2",
     "transformers==5.4.0",
     # Third-party integrations
     "nvidia-curobo",
