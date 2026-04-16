@@ -1,139 +1,257 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+"""Warp-accelerated sphere-to-sphere overlap computation.
 
-from typing import Optional
+Replaces the PyTorch implementation in costs.py with a fused GPU kernel that avoids
+materializing the O(n1 * n2) pairwise intermediate tensor. See docs/profiling-analysis.md
+for the motivation.
+"""
 
 import torch
+import warp as wp
 from jaxtyping import Float
 
-from cutamp.costs_warp import sphere_to_sphere_overlap_warp
+wp.config.quiet = True
+wp.init()
+wp.set_module_options({"fast_math": False})
 
 
-def trajectory_length(
-    confs: Float[torch.Tensor, "b *h d"], weights: Optional[Float[torch.Tensor, "d"]] = None
-) -> Float[torch.Tensor, "b"]:
+@wp.kernel
+def _sphere_overlap_fwd_kernel_1(
+    spheres_1: wp.array(dtype=wp.float32, ndim=2),
+    spheres_2: wp.array(dtype=wp.float32, ndim=2),
+    activation_distance: wp.float32,
+    n1: wp.int32,
+    n2: wp.int32,
+    partial_cost: wp.array(dtype=wp.float32, ndim=2),
+    grad_spheres_1: wp.array(dtype=wp.float32, ndim=2),
+):
+    """Forward kernel 1: one thread per (batch_elem, sphere_1_idx).
+
+    Loops over all spheres in set 2 to compute partial cost and gradient for spheres_1.
+    spheres_1/spheres_2 are flattened to (flat_batch * n, 4).
+    partial_cost is (flat_batch, n1). grad_spheres_1 is (flat_batch * n1, 4).
     """
-    Compute the length of a trajectory by summing the distances between consecutive configurations.
-    Optionally apply per-dimension weights before computing distances.
+    tid = wp.tid()
+    flat_batch = partial_cost.shape[0]
+    if tid >= flat_batch * n1:
+        return
+
+    batch_idx = tid / n1
+    i = tid - batch_idx * n1
+
+    # Read sphere 1
+    s1_base = batch_idx * n1 + i
+    c1x = spheres_1[s1_base, 0]
+    c1y = spheres_1[s1_base, 1]
+    c1z = spheres_1[s1_base, 2]
+    r1 = spheres_1[s1_base, 3]
+
+    cost_accum = float(0.0)
+    gc1x = float(0.0)
+    gc1y = float(0.0)
+    gc1z = float(0.0)
+    gr1 = float(0.0)
+
+    s2_base_start = batch_idx * n2
+    for j in range(n2):
+        s2_idx = s2_base_start + j
+        c2x = spheres_2[s2_idx, 0]
+        c2y = spheres_2[s2_idx, 1]
+        c2z = spheres_2[s2_idx, 2]
+        r2 = spheres_2[s2_idx, 3]
+
+        dx = c1x - c2x
+        dy = c1y - c2y
+        dz = c1z - c2z
+        dist_sq = dx * dx + dy * dy + dz * dz
+
+        # Early exit: if squared distance exceeds threshold, no overlap possible
+        threshold = r1 + r2 + activation_distance
+        if dist_sq >= threshold * threshold:
+            continue
+
+        dist = wp.sqrt(dist_sq + 1.0e-8)
+        penetration = threshold - dist  # = r1 + r2 + act_dist - dist
+
+        if penetration > 0.0:
+            cost_accum += penetration
+            # Gradient: d(pen)/d(c1) = -(c1 - c2) / dist
+            inv_dist = 1.0 / dist
+            gc1x -= dx * inv_dist
+            gc1y -= dy * inv_dist
+            gc1z -= dz * inv_dist
+            gr1 += 1.0
+
+    partial_cost[batch_idx, i] = cost_accum
+    grad_spheres_1[tid, 0] = gc1x
+    grad_spheres_1[tid, 1] = gc1y
+    grad_spheres_1[tid, 2] = gc1z
+    grad_spheres_1[tid, 3] = gr1
+
+
+@wp.kernel
+def _sphere_overlap_fwd_kernel_2(
+    spheres_1: wp.array(dtype=wp.float32, ndim=2),
+    spheres_2: wp.array(dtype=wp.float32, ndim=2),
+    activation_distance: wp.float32,
+    n1: wp.int32,
+    n2: wp.int32,
+    grad_spheres_2: wp.array(dtype=wp.float32, ndim=2),
+):
+    """Forward kernel 2: one thread per (batch_elem, sphere_2_idx).
+
+    Loops over all spheres in set 1 to compute gradient for spheres_2.
     """
-    if weights is not None:
-        assert weights.shape == (confs.shape[-1],), f"weights must be shape ({confs.shape[-1]},), got {weights.shape}"
-        weights = weights.to(confs.device)
-        confs = confs * weights
+    tid = wp.tid()
+    flat_batch = grad_spheres_2.shape[0] / n2
+    if tid >= flat_batch * n2:
+        return
 
-    diffs = confs[..., 1:, :] - confs[..., :-1, :]
-    dists = diffs.norm(dim=-1)
-    traj_lengths = dists.sum(-1)  # sum over horizon
-    return traj_lengths
+    batch_idx = tid / n2
+    j = tid - batch_idx * n2
+
+    # Read sphere 2
+    s2_base = batch_idx * n2 + j
+    c2x = spheres_2[s2_base, 0]
+    c2y = spheres_2[s2_base, 1]
+    c2z = spheres_2[s2_base, 2]
+    r2 = spheres_2[s2_base, 3]
+
+    gc2x = float(0.0)
+    gc2y = float(0.0)
+    gc2z = float(0.0)
+    gr2 = float(0.0)
+
+    s1_base_start = batch_idx * n1
+    for i in range(n1):
+        s1_idx = s1_base_start + i
+        c1x = spheres_1[s1_idx, 0]
+        c1y = spheres_1[s1_idx, 1]
+        c1z = spheres_1[s1_idx, 2]
+        r1 = spheres_1[s1_idx, 3]
+
+        dx = c1x - c2x
+        dy = c1y - c2y
+        dz = c1z - c2z
+        dist_sq = dx * dx + dy * dy + dz * dz
+
+        threshold = r1 + r2 + activation_distance
+        if dist_sq >= threshold * threshold:
+            continue
+
+        dist = wp.sqrt(dist_sq + 1.0e-8)
+        penetration = threshold - dist
+
+        if penetration > 0.0:
+            # Gradient: d(pen)/d(c2) = +(c1 - c2) / dist (opposite sign from c1)
+            inv_dist = 1.0 / dist
+            gc2x += dx * inv_dist
+            gc2y += dy * inv_dist
+            gc2z += dz * inv_dist
+            gr2 += 1.0
+
+    grad_spheres_2[tid, 0] = gc2x
+    grad_spheres_2[tid, 1] = gc2y
+    grad_spheres_2[tid, 2] = gc2z
+    grad_spheres_2[tid, 3] = gr2
 
 
-def dist_from_bounds(
-    vals: Float[torch.Tensor, "b *h d"],
-    lower: Float[torch.Tensor, "d"],
-    upper: Float[torch.Tensor, "d"],
-) -> Float[torch.Tensor, "b *h"]:
-    """Euclidean distance of values from the given lower and upper bounds. If within the bounds, returns 0."""
-    diff_lower = lower - vals
-    diff_upper = vals - upper
-    diff_max = torch.maximum(diff_lower, diff_upper)
-    diff_max = diff_max.clamp(min=0.0)
-    dists = diff_max.norm(p=2, dim=-1)
-    return dists
+class _SphereOverlapWarp(torch.autograd.Function):
+    """Warp-accelerated sphere-to-sphere overlap with analytical gradients.
+
+    Inputs must have matching batch dims. The ``need_grad`` check uses ``requires_grad`` on the
+    inputs (not ``torch.is_grad_enabled()``) because PyTorch disables autograd inside
+    ``Function.forward``, so ``is_grad_enabled()`` is always False here.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        spheres_1: Float[torch.Tensor, "*batch n1 4"],
+        spheres_2: Float[torch.Tensor, "*batch n2 4"],
+        activation_distance: float,
+    ) -> Float[torch.Tensor, "*batch"]:
+        batch_shape = spheres_1.shape[:-2]
+        n1 = spheres_1.shape[-2]
+        n2 = spheres_2.shape[-2]
+        flat_batch = 1
+        for s in batch_shape:
+            flat_batch *= s
+
+        device = spheres_1.device
+        torch_stream = torch.cuda.current_stream(device)
+        stream = wp.stream_from_torch(torch_stream)
+
+        # Flatten to (flat_batch * n, 4) for warp — reshape is a view, no copy
+        s1_flat = spheres_1.detach().reshape(flat_batch * n1, 4)
+        s2_flat = spheres_2.detach().reshape(flat_batch * n2, 4)
+
+        # Allocate outputs
+        partial_cost = torch.zeros(flat_batch, n1, device=device, dtype=torch.float32)
+        grad_s1 = torch.zeros(flat_batch * n1, 4, device=device, dtype=torch.float32)
+        act_dist = 0.0 if activation_distance is None else float(activation_distance)
+        need_grad = spheres_1.requires_grad or spheres_2.requires_grad
+
+        # Kernel 1: cost + grad_spheres_1 (grad_s1 is always written by the kernel as a byproduct)
+        wp.launch(
+            kernel=_sphere_overlap_fwd_kernel_1,
+            dim=flat_batch * n1,
+            inputs=[
+                wp.from_torch(s1_flat, dtype=wp.float32),
+                wp.from_torch(s2_flat, dtype=wp.float32),
+                act_dist,
+                n1,
+                n2,
+                wp.from_torch(partial_cost, dtype=wp.float32),
+                wp.from_torch(grad_s1, dtype=wp.float32),
+            ],
+            stream=stream,
+        )
+
+        # Kernel 2: grad_spheres_2 (only needed when spheres_2 requires grad)
+        grad_s2 = None
+        if spheres_2.requires_grad:
+            grad_s2 = torch.zeros(flat_batch * n2, 4, device=device, dtype=torch.float32)
+            wp.launch(
+                kernel=_sphere_overlap_fwd_kernel_2,
+                dim=flat_batch * n2,
+                inputs=[
+                    wp.from_torch(s1_flat, dtype=wp.float32),
+                    wp.from_torch(s2_flat, dtype=wp.float32),
+                    act_dist,
+                    n1,
+                    n2,
+                    wp.from_torch(grad_s2, dtype=wp.float32),
+                ],
+                stream=stream,
+            )
+
+        # Sum partial costs across n1 to get per-batch-element cost
+        cost = partial_cost.sum(dim=-1)  # (flat_batch,)
+        cost = cost.reshape(batch_shape)
+
+        # Reshape and save gradients for backward. Use an empty placeholder for grad_s2 when
+        # spheres_2 doesn't require grad so we don't allocate a full-size zero tensor.
+        if need_grad:
+            grad_s1 = grad_s1.reshape(*batch_shape, n1, 4)
+            grad_s2 = grad_s2.reshape(*batch_shape, n2, 4) if grad_s2 is not None else torch.empty(0, device=device)
+            ctx.save_for_backward(grad_s1, grad_s2)
+
+        return cost
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_s1_stored, grad_s2_stored = ctx.saved_tensors
+        # grad_output: (*batch,) -> expand to (*batch, n, 4)
+        grad_expand = grad_output[..., None, None]  # (*batch, 1, 1)
+        grad_spheres_1 = grad_s1_stored * grad_expand if ctx.needs_input_grad[0] else None
+        grad_spheres_2 = grad_s2_stored * grad_expand if ctx.needs_input_grad[1] else None
+        return grad_spheres_1, grad_spheres_2, None
 
 
-@torch.jit.script
-def dist_from_bounds_jit(vals, lower, upper):
-    """Euclidean distance of values from the given lower and upper bounds. If within the bounds, returns 0."""
-    diff_lower = lower - vals
-    diff_upper = vals - upper
-    diff_max = torch.maximum(diff_lower, diff_upper)
-    diff_max = diff_max.clamp(min=0.0)
-    dists = diff_max.norm(p=2, dim=-1)
-    return dists
-
-
-def get_aabb_from_spheres(spheres: Float[torch.Tensor, "*b n 4"]) -> Float[torch.Tensor, "*b 2 3"]:
-    """Compute the axis-aligned bounding box (AABB) for a set of spheres that represent some object."""
-    centers, radii = spheres[..., :3], spheres[..., 3]
-    min_corners = centers - radii.unsqueeze(-1)
-    min_corners = min_corners.min(-2).values  # take min over spheres in the batch
-
-    max_corners = centers + radii.unsqueeze(-1)
-    max_corners = max_corners.max(-2).values  # take max over spheres in the batch
-
-    aabb = torch.stack([min_corners, max_corners], dim=-2)
-    return aabb
-
-
-def sphere_to_sphere_overlap_pytorch(
-    spheres_1: Float[torch.Tensor, "*#batch n1 4"],
-    spheres_2: Float[torch.Tensor, "*#batch n2 4"],
+def sphere_to_sphere_overlap_warp(
+    spheres_1: Float[torch.Tensor, "*batch n1 4"],
+    spheres_2: Float[torch.Tensor, "*batch n2 4"],
     activation_distance: float,
 ) -> Float[torch.Tensor, "*batch"]:
-    """PyTorch reference implementation. Broadcasts over batch dims and materializes the
-    O(n1*n2) pairwise intermediate tensor."""
-    centers_1, radii_1 = spheres_1[..., :3], spheres_1[..., 3]
-    centers_2, radii_2 = spheres_2[..., :3], spheres_2[..., 3]
-
-    # Manual distance computation - more efficient than cdist for fusing with torch.compile.
-    # Shape: (*batch, n1, 1, 3) - (*batch, 1, n2, 3) -> (*batch, n1, n2, 3)
-    diff = centers_1.unsqueeze(-2) - centers_2.unsqueeze(-3)
-    dist_sq = (diff * diff).sum(dim=-1)
-    dist = torch.sqrt(dist_sq + 1e-8)  # add epsilon for numerical stability
-
-    # Compute penetration depth: sum of radii + activation distance - distance
-    radii_sum = radii_1.unsqueeze(-1) + radii_2.unsqueeze(-2)
-    penetration = radii_sum - dist + activation_distance
-
-    # Return sum of positive penetrations
-    return torch.relu(penetration).sum((-2, -1))
-
-
-def sphere_to_sphere_overlap(
-    spheres_1: Float[torch.Tensor, "*#batch n1 4"],
-    spheres_2: Float[torch.Tensor, "*#batch n2 4"],
-    activation_distance: float | None = None,
-    aabb_1: Float[torch.Tensor, "*batch 2 3"] | None = None,
-    aabb_2: Float[torch.Tensor, "*batch 2 3"] | None = None,
-    use_aabb_check: bool = False,
-) -> Float[torch.Tensor, "*batch"]:
-    """
-    Compute the overlap volume between two sets of spheres. Can be used as a collision distance function.
-    Broadcasts over batch dims. If use_aabb_check=True, we compute the overlap only for batches of spheres
-    that have intersecting AABBs (requires matching batch dims).
-
-    Uses the Warp kernel when batch dims match, falls back to PyTorch for broadcasting cases.
-    """
-    act_dist = 0.0 if activation_distance is None else activation_distance
-
-    # Warp kernel requires matching batch dims; fall back to PyTorch for broadcasting
-    if spheres_1.shape[:-2] == spheres_2.shape[:-2]:
-        overlap_fn = sphere_to_sphere_overlap_warp
-    else:
-        overlap_fn = sphere_to_sphere_overlap_pytorch
-
-    if not use_aabb_check:
-        return overlap_fn(spheres_1, spheres_2, act_dist)
-
-    # Compute AABB for each batch of spheres
-    if aabb_1 is None:
-        aabb_1 = get_aabb_from_spheres(spheres_1)  # [b, *h, 2, 3]
-    if aabb_2 is None:
-        aabb_2 = get_aabb_from_spheres(spheres_2)  # [b, *h, 2, 3]
-
-    # Check intersection
-    min_1, max_1 = aabb_1.unbind(-2)
-    min_2, max_2 = aabb_2.unbind(-2)
-    intersect = (min_1 <= max_2).all(-1) & (max_1 >= min_2).all(-1)  # [b, *h]
-
-    output = torch.zeros_like(intersect, dtype=torch.float32)  # [b, *h]
-    if intersect.any():
-        # Only compute overlap for intersecting AABBs
-        output[intersect] = overlap_fn(spheres_1[intersect], spheres_2[intersect], act_dist)
-    return output
+    """Warp-accelerated sphere-to-sphere overlap. Requires matching batch dims."""
+    return _SphereOverlapWarp.apply(spheres_1, spheres_2, activation_distance)
