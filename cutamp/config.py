@@ -17,10 +17,17 @@ class TAMPConfiguration:
     num_particles: int = 1024
 
     # Robot embodiment to use
-    robot: Literal["panda", "ur5", "xarm7"] = "xarm7"
+    robot: Literal[
+        "panda",
+        "fr3_robotiq",
+        "ur5",
+        "panda_robotiq",
+        "fr3_franka",
+        "xarm7",
+    ] = "panda"
 
     # Grasp and Placements
-    grasp_dof: Literal[4, 6] = 6
+    grasp_dof: Literal[4, 6] = 4
     place_dof: Literal[4] = 4
 
     # Approach to use. Note: optimization includes particle initialization (i.e., sampling)
@@ -73,6 +80,10 @@ class TAMPConfiguration:
     coll_sphere_radius: float = 0.005
     # Distance at which collision checking is activated between the world (in cuRobo)
     world_activation_distance: float = 0.0
+    # Mask out movable-to-world collision costs at timesteps before each object's first placement.
+    # Objects may initially be in collision with surfaces they rest on due to perception noise.
+    # Set to False in simulation or when debugging to surface genuine environment setup issues.
+    mask_initial_movable_world_collision: bool = True
     # Distance at which collision checking is activated between gripper and movables
     gripper_activation_distance: float = 0.0
     # Distance at which collision checking is activated between movables and movables
@@ -111,7 +122,7 @@ class TAMPConfiguration:
 def validate_tamp_config(config: TAMPConfiguration):
     if config.num_particles <= 0:
         raise ValueError(f"num_particles must be positive, not {config.num_particles}")
-    if config.robot not in {"panda", "ur5", "xarm7"}:
+    if config.robot not in {"panda", "fr3_robotiq", "ur5", "panda_robotiq", "fr3_franka", "xarm7"}:
         raise ValueError(f"Invalid embodiment: {config.robot}")
     if config.grasp_dof not in {4, 6}:
         raise ValueError(f"Invalid grasp_dof: {config.grasp_dof}")

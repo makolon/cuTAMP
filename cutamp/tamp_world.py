@@ -7,6 +7,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import itertools
 import logging
 import warnings
 from functools import cached_property
@@ -19,6 +20,7 @@ from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
 from curobo.geom.types import Obstacle
 from curobo.types.base import TensorDeviceType
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
+from cutamp.costs import sphere_to_sphere_overlap
 from cutamp.envs import TAMPEnvironment
 from cutamp.robots import RobotContainer, load_robot_container
 from cutamp.robots.franka import franka_curobo_cfg, get_franka_ik_solver
@@ -219,7 +221,9 @@ class TAMPWorld:
         return motion_gen
 
 
-def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1e-6):
+def check_tamp_world_not_in_collision(
+    world: TAMPWorld, collision_tol: float = 1e-6, movable_activation_dist: float = 0.0
+):
     """Check that the initial state of the movable objects are not in collision."""
     for obj in world.movables:
         # Transform spheres to world frame
@@ -229,4 +233,23 @@ def check_tamp_world_not_in_collision(world: TAMPWorld, collision_tol: float = 1
 
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
-            raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+            _log.warning(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+            # raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
+
+    # Catch collisions between spheres for movable objects
+    obj_to_spheres = {}
+    for idx, obj in enumerate(world.movables):
+        obj_spheres = transform_spheres(world.get_collision_spheres(obj), world.get_object_pose(obj))
+        obj_to_spheres[obj.name] = obj_spheres
+
+    for obj_1, obj_2 in itertools.combinations(world.movables, 2):
+        obj_1_spheres = obj_to_spheres[obj_1.name]
+        obj_2_spheres = obj_to_spheres[obj_2.name]
+        coll_cost = sphere_to_sphere_overlap(
+            obj_1_spheres,
+            obj_2_spheres,
+            activation_distance=movable_activation_dist,
+            use_aabb_check=True,
+        )
+        if coll_cost > collision_tol:
+            _log.warning(f"Initial state in collision between {obj_1.name} and {obj_2.name} with cost {coll_cost}")

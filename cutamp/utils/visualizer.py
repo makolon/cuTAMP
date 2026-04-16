@@ -8,7 +8,7 @@
 # its affiliates is strictly prohibited.
 
 from abc import ABC, abstractmethod
-from typing import Union
+from typing import Union, Optional
 
 import numpy as np
 import rerun as rr
@@ -19,12 +19,8 @@ from jaxtyping import Float
 from cutamp.config import TAMPConfiguration
 from cutamp.robots import load_rerun_robot
 from cutamp.tamp_world import TAMPWorld
-from cutamp.utils.rerun_utils import (
-    log_curobo_pose_to_rerun,
-    curobo_to_rerun,
-    log_curobo_mesh_to_rerun,
-    AXIS_LENGTH,
-)
+from cutamp.utils.obb import get_object_obb
+from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
 
 
 class Visualizer(ABC):
@@ -183,12 +179,12 @@ class RerunVisualizer(Visualizer):
         return end_time
 
     def log_tamp_world(self, world: TAMPWorld):
-        rr_log_tamp_world(world)
+        rr_log_tamp_world(world, surface_shrink_dist=self.config.placement_shrink_dist)
 
     def log_mat4x4(self, name: str, mat4x4: Float[Union[torch.Tensor, np.ndarray], "4 4"]):
         if isinstance(mat4x4, torch.Tensor):
             mat4x4 = mat4x4.detach().cpu()
-        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3]), rr.TransformAxes3D(AXIS_LENGTH))
+        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3], axis_length=AXIS_LENGTH))
 
     def log_spheres(self, name: str, spheres: Float[torch.Tensor, "n 4"]):
         if isinstance(spheres, torch.Tensor):
@@ -199,7 +195,9 @@ class RerunVisualizer(Visualizer):
         rr.log(name, rr.Scalars(value))
 
 
-def rr_log_tamp_world(world: TAMPWorld, log_spheres: bool = True, log_arrows: bool = True):
+def rr_log_tamp_world(
+    world: TAMPWorld, surface_shrink_dist: Optional[float] = None, log_spheres: bool = True, log_arrows: bool = True
+):
     """Log TAMPWorld in rerun."""
     # Log movables
     for obj in world.movables:
@@ -225,3 +223,22 @@ def rr_log_tamp_world(world: TAMPWorld, log_spheres: bool = True, log_arrows: bo
     # Static objects
     for obj in world.statics:
         log_curobo_mesh_to_rerun(f"world/{obj.name}", obj.get_mesh(), static_transform=True)
+
+    # Plot OBB for surfaces
+    for obj in world.env.type_to_objects["Surface"]:
+        obb = get_object_obb(obj, shrink_dist=surface_shrink_dist)
+        if isinstance(obj, Mesh):
+            rgb = np.array(obj.vertex_colors).mean(0) if obj.vertex_colors else [0.5, 0.5, 0.5]
+        else:
+            rgb = obj.color
+        quat_xyzw = obb.quat_wxyz[[1, 2, 3, 0]]
+        rr.log(
+            f"surface/{obj.name}/obb",
+            rr.Boxes3D(
+                centers=obb.center.cpu(),
+                half_sizes=obb.half_extents.cpu(),
+                quaternions=quat_xyzw.cpu(),
+                colors=rgb,
+                labels=obj.name,
+            ),
+        )
