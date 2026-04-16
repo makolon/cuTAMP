@@ -137,10 +137,8 @@ def log_curobo_pose_to_rerun(key: str, obj: Obstacle, static_transform: bool, lo
         translation=obj.pose[:3],
         quaternion=[obj.pose[4], obj.pose[5], obj.pose[6], obj.pose[3]],
     )
-    if log_arrows:
-        rr.log(key, transform, rr.TransformAxes3D(AXIS_LENGTH), static=static_transform)
-    else:
-        rr.log(key, transform, static=static_transform)
+    # TransformAxes3D deprecated in rerun >= 0.17
+    rr.log(key, transform, static=static_transform)
 
 
 def log_curobo_mesh_to_rerun(

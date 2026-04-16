@@ -88,6 +88,11 @@ robot_to_fns = {
         "q_home": franka_neutral_joint_positions[:7],  # exclude gripper joint
         "container": load_panda_container,
     },
+    "panda_robotiq": {
+        "rerun": load_franka_rerun,
+        "q_home": franka_neutral_joint_positions[:7],  # exclude gripper joint
+        "container": load_panda_container,
+    },
     "ur5": {
         "rerun": load_ur5_rerun,
         "q_home": ur5_home[:6],
