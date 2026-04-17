@@ -534,6 +534,7 @@ def run_cutamp(
             )
 
             if config.curobo_plan:
+                obj_to_initial_pose = {obj.name: world.get_object_pose(obj) for obj in world.movables}
                 num_satisfying = list(ranked_particles.values())[0].shape[0]
                 max_attempts = min(config.max_motion_refine_attempts or num_satisfying, num_satisfying)
                 for curr_idx in range(max_attempts):
@@ -547,6 +548,7 @@ def run_cutamp(
                             config,
                             timer,
                             visualizer,
+                            obj_to_initial_pose=obj_to_initial_pose,
                             timeline=f"curobo_{curr_idx}",
                         )
                         _log.info("Successful plan found!")
