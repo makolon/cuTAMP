@@ -7,4 +7,4 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from .utils import TAMPEnvironment, load_env  # noqa: F401
+from .utils import TAMPEnvironment, get_env_dir, load_env  # noqa: F401

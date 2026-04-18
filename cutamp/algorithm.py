@@ -33,7 +33,7 @@ from cutamp.tamp_domain import all_tamp_operators
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.timer import TorchTimer
-from cutamp.utils.visualizer import RerunVisualizer
+from cutamp.utils.visualizer import MockVisualizer, RerunVisualizer
 
 _log = logging.getLogger(__name__)
 
@@ -304,11 +304,18 @@ def setup_cutamp(
 
     # Setup visualizer (doesn't count towards timing)
     visualizer = (
-        RerunVisualizer(config, q_init, rerun_robot=robot_container.rerun_robot, application_id=env.name, recording_id=experiment_id, spawn=config.rr_spawn)
+        RerunVisualizer(
+            config,
+            q_init,
+            rerun_robot=robot_container.rerun_robot,
+            application_id=env.name,
+            recording_id=experiment_id,
+            spawn=config.rr_spawn,
+        )
         if config.enable_visualizer
-        else None
+        else MockVisualizer()
     )
-    if visualizer is not None:
+    if config.enable_visualizer:
         visualizer.log_tamp_world(world)
     return exp_logger, visualizer, timer, world
 
