@@ -35,7 +35,6 @@ from cutamp.task_planning.constraints import (
     Motion,
     StablePlacement,
     ValidPush,
-    ValidPushStick,
 )
 from cutamp.task_planning.costs import GraspCost, TrajectoryLength
 from cutamp.utils.common import transform_spheres
@@ -77,7 +76,6 @@ class CostFunction:
             CollisionFreePlacement.type: self.cfree_constraints,
             StablePlacement.type: self.stable_placement_constraints,
             ValidPush.type: self.valid_push_constraints,
-            ValidPushStick.type: self.valid_push_stick_constraints,
             TrajectoryLength.type: self.traj_length_costs,
         }
         warning_co = {GraspCost.type}
@@ -158,29 +156,6 @@ class CostFunction:
             self.button_to_action[button] = action
         self.button_aabbs = torch.stack(self.button_aabbs) if self.button_aabbs else None
 
-        # Store the buttons and sticks for ValidPushStick
-        self.button_stick_actions = {}
-        self.button_stick_aabbs = []
-        self.button_to_stick = {}
-        for con in self.valid_push_stick_constraints:
-            button, stick, action = con.params
-            if not self.world.has_object(button):
-                raise ValueError(f"{button=} not found in world")
-            if not self.world.has_object(stick):
-                raise ValueError(f"{stick=} not found in world")
-            if button in self.button_to_stick:
-                raise NotImplementedError(f"We only support pushing a button once right now")
-
-            # Set z to be 2cm buffer above surface of the button
-            button_aabb = self.world.get_aabb(button).clone()
-            button_aabb[0, 2] = button_aabb[1, 2] + world.collision_activation_distance + 2e-3
-            button_aabb[1, 2] = button_aabb[1, 2] + world.collision_activation_distance + 0.02
-            self.button_stick_aabbs.append(button_aabb)
-
-            self.button_to_stick[button] = stick
-            self.button_stick_actions[button] = action
-        self.button_stick_aabbs = torch.stack(self.button_stick_aabbs) if self.button_stick_aabbs else None
-
         # All conf parameters for trajectory length costs, we check rollout matches
         # No support for trajectories right now
         self.traj_length_confs = []
@@ -196,21 +171,30 @@ class CostFunction:
         # Identify which objects are manipulated in the plan
         self.activated_obj = set()
         self.obj_to_first_place = {}
+        obj_to_first_push = {}
+        held_obj = None
         for ground_op in plan_skeleton:
             op_name = ground_op.operator.name
             if op_name == "Pick":
                 obj = ground_op.values[0]
                 self.activated_obj.add(obj)
+                held_obj = obj
             elif op_name == "Place":
                 obj = ground_op.values[0]
                 pose = ground_op.values[2]
                 self.activated_obj.add(obj)
                 if obj not in self.obj_to_first_place:
                     self.obj_to_first_place[obj] = pose
-            elif op_name == "PushStick" or op_name == "Push":
-                raise NotImplementedError(f"Haven't handled {op_name}")
+                if held_obj == obj:
+                    held_obj = None
+            elif op_name == "Push":
+                if held_obj is not None and held_obj not in obj_to_first_push:
+                    obj_to_first_push[held_obj] = ground_op.values[1]
             else:
                 assert op_name == "MoveFree" or op_name == "MoveHolding"
+        for obj, action in obj_to_first_push.items():
+            if obj not in self.obj_to_first_place:
+                self.obj_to_first_place[obj] = action
 
         # Pre-compute movable object pairs for collision checking.
         # Only include pairs where at least one object is manipulated
@@ -462,30 +446,36 @@ class CostFunction:
         # analogously by temporarily detaching the object from the robot when the grasped object's
         # spheres cause an invalid start state during retract planning.
         with torch.profiler.record_function("coll::movable_to_world"):
-            stacked = torch.stack([obj_to_spheres[obj] for obj in self._activated_objs])
-            coll = self.world.collision_fn(rearrange(stacked, "objs b t n d -> (objs b) t n d"))
-            coll = rearrange(coll, "(objs b) t -> objs b t", objs=len(self._activated_objs))
-            if self.config.mask_initial_movable_world_collision:
-                if self._movable_world_mask is None:
-                    num_objs, t = coll.shape[0], coll.shape[2]
-                    mask = torch.ones(num_objs, 1, t, device=coll.device)
-                    for i, obj in enumerate(self._activated_objs):
-                        first_ts = self.obj_to_first_pose_ts[obj]
-                        if first_ts > 0:
-                            mask[i, :, :first_ts] = 0.0
-                    self._movable_world_mask = mask
-                coll = coll * self._movable_world_mask
-            coll_values["movable_to_world"] = coll.sum(dim=0)
+            if self._activated_objs:
+                stacked = torch.stack([obj_to_spheres[obj] for obj in self._activated_objs])
+                coll = self.world.collision_fn(rearrange(stacked, "objs b t n d -> (objs b) t n d"))
+                coll = rearrange(coll, "(objs b) t -> objs b t", objs=len(self._activated_objs))
+                if self.config.mask_initial_movable_world_collision:
+                    if self._movable_world_mask is None:
+                        num_objs, t = coll.shape[0], coll.shape[2]
+                        mask = torch.ones(num_objs, 1, t, device=coll.device)
+                        for i, obj in enumerate(self._activated_objs):
+                            first_ts = self.obj_to_first_pose_ts[obj]
+                            if first_ts > 0:
+                                mask[i, :, :first_ts] = 0.0
+                        self._movable_world_mask = mask
+                    coll = coll * self._movable_world_mask
+                coll_values["movable_to_world"] = coll.sum(dim=0)
+            else:
+                coll_values["movable_to_world"] = torch.zeros_like(coll_values["robot_to_world"])
 
         with torch.profiler.record_function("coll::robot_to_movables"):
             # Concatenate all movable spheres into one kernel launch — faster than per-object
             # launches at our sphere counts (~50/object) where launch overhead dominates.
-            all_obj_spheres = torch.cat(
-                [obj_s[:, self._all_pose_ts] for obj_s in obj_to_spheres.values()], dim=-2
-            )
-            coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
-                robot_spheres, all_obj_spheres, activation_distance=self.config.gripper_activation_distance
-            )
+            if obj_to_spheres:
+                all_obj_spheres = torch.cat(
+                    [obj_s[:, self._all_pose_ts] for obj_s in obj_to_spheres.values()], dim=-2
+                )
+                coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
+                    robot_spheres, all_obj_spheres, activation_distance=self.config.gripper_activation_distance
+                )
+            else:
+                coll_values["robot_to_movables"] = torch.zeros_like(coll_values["robot_to_world"])
 
         # Collision between movable objects
         if self.movable_obj_pairs:

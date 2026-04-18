@@ -146,10 +146,10 @@ def approximate_goal_aabb(goal: Obstacle) -> Float[torch.Tensor, "2 3"]:
         upper = vertices.max(dim=0).values
         aabb = torch.stack([lower, upper])
     elif isinstance(goal, Cuboid):
-        # TODO: handle cases when the goal is not axis-aligned. i.e., has rotation
-        goal_xyz = torch.tensor(goal.dims)
-        aabb = torch.stack([-goal_xyz / 2, goal_xyz / 2])
-        aabb = transform_points(aabb, mat4x4)
+        half_extents = torch.tensor(goal.dims, dtype=mat4x4.dtype) / 2
+        center = mat4x4[:3, 3]
+        world_half_extents = torch.abs(mat4x4[:3, :3]) @ half_extents
+        aabb = torch.stack([center - world_half_extents, center + world_half_extents])
     else:
         raise NotImplementedError(f"Goal type {type(goal)} not supported yet.")
 
@@ -158,11 +158,13 @@ def approximate_goal_aabb(goal: Obstacle) -> Float[torch.Tensor, "2 3"]:
 
 def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> WorldConfig:
     """Get the cuRobo WorldConfig from the TAMP environment."""
+
     from cutamp.utils.obb import get_object_obb
 
     geoms = defaultdict(list)
-    obstacles = env.movables if include_movables else []
-    obstacles += env.statics
+    # Copy lists to avoid mutating env.movables when appending statics.
+    obstacles = list(env.movables) if include_movables else []
+    obstacles += list(env.statics)
     for obj in obstacles:
         if isinstance(obj, Cuboid):
             geoms["cuboid"].append(obj)

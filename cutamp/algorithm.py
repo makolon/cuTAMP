@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
-from unittest.mock import Mock
 
 import torch
 from curobo.types.base import TensorDeviceType
@@ -25,16 +24,16 @@ from cutamp.cost_function import CostFunction
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs.utils import TAMPEnvironment
 from cutamp.experiment_logger import ExperimentLogger
-from cutamp.motion_solver import solve_curobo, MotionPlanningError
+from cutamp.motion_solver import solve_curobo
 from cutamp.optimize_plan import ParticleOptimizer
 from cutamp.particle_initialization import ParticleInitializer
-from cutamp.robots import get_q_home, load_robot_container
+from cutamp.robots import RobotContainer
 from cutamp.rollout import RolloutFunction
 from cutamp.tamp_domain import all_tamp_operators
 from cutamp.tamp_world import TAMPWorld, check_tamp_world_not_in_collision
 from cutamp.task_planning import PlanSkeleton, task_plan_generator
 from cutamp.utils.timer import TorchTimer
-from cutamp.utils.visualizer import RerunVisualizer, MockVisualizer
+from cutamp.utils.visualizer import RerunVisualizer
 
 _log = logging.getLogger(__name__)
 
@@ -259,6 +258,7 @@ def resample_plan_info(
 def setup_cutamp(
     env: TAMPEnvironment,
     config: TAMPConfiguration,
+    robot_container: RobotContainer,
     q_init: Optional[List[float]] = None,
     experiment_id: Optional[str] = None,
     experiment_dir: Optional[Union[Path, str]] = None,
@@ -273,15 +273,15 @@ def setup_cutamp(
     exp_logger = (
         ExperimentLogger(name=experiment_id, config=config, experiment_dir=experiment_dir)
         if config.enable_experiment_logging
-        else Mock()
+        else None
     )
-    exp_logger.save_env(env)
+    if exp_logger is not None:
+        exp_logger.save_env(env)
 
     # Loading robot can be done offline, so doesn't count towards timing
     tensor_args = TensorDeviceType()
-    robot_container = load_robot_container(config.robot, tensor_args)
     if q_init is None:
-        q_init = get_q_home(config.robot)
+        raise ValueError("q_init must be provided")
     q_init = tensor_args.to_device(q_init)
 
     # Load TAMP world and warmup IK solver
@@ -304,17 +304,19 @@ def setup_cutamp(
 
     # Setup visualizer (doesn't count towards timing)
     visualizer = (
-        RerunVisualizer(config, q_init, application_id=env.name, recording_id=experiment_id, spawn=config.rr_spawn)
+        RerunVisualizer(config, q_init, rerun_robot=robot_container.rerun_robot, application_id=env.name, recording_id=experiment_id, spawn=config.rr_spawn)
         if config.enable_visualizer
-        else MockVisualizer()
+        else None
     )
-    visualizer.log_tamp_world(world)
+    if visualizer is not None:
+        visualizer.log_tamp_world(world)
     return exp_logger, visualizer, timer, world
 
 
 def run_cutamp(
     env: TAMPEnvironment,
     config: TAMPConfiguration,
+    robot_container: RobotContainer,
     cost_reducer: CostReducer,
     constraint_checker: ConstraintChecker,
     q_init: Optional[List[float]] = None,
@@ -327,6 +329,7 @@ def run_cutamp(
     exp_logger, visualizer, timer, world = setup_cutamp(
         env,
         config,
+        robot_container,
         q_init=q_init,
         experiment_id=experiment_id,
         experiment_dir=experiment_dir,
@@ -414,7 +417,8 @@ def run_cutamp(
             if time_exceeded:
                 _log.info(f"Max loop duration reached, stopping optimization")
                 should_break = True
-            exp_logger.log_dict(f"optimization/opt_{opt_iter:04d}", metrics)
+            if exp_logger is not None:
+                exp_logger.log_dict(f"optimization/opt_{opt_iter:04d}", metrics)
             if has_satisfying:
                 best_particle = get_best_particle(plan_info, config, constraint_checker, cost_reducer)
         else:
@@ -554,7 +558,7 @@ def run_cutamp(
                         _log.info("Successful plan found!")
                         failure_reason = None
                         break
-                    except MotionPlanningError as e:
+                    except RuntimeError as e:
                         _log.warning(f"Failed to motion plan: {e}")
                 else:
                     # All attempted particles failed motion planning
@@ -608,11 +612,12 @@ def run_cutamp(
 
     # Dump metrics out
     overall_metrics["found_solution"] = found_solution
-    exp_logger.log_dict("overall_metrics", overall_metrics)
-    exp_logger.log_dict("timer_metrics", timer.get_summaries())
+    if exp_logger is not None:
+        exp_logger.log_dict("overall_metrics", overall_metrics)
+        exp_logger.log_dict("timer_metrics", timer.get_summaries())
 
-    # Log constraint and cost multipliers
-    exp_logger.log_dict("multipliers", cost_reducer.cost_config)
-    exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
+        # Log constraint and cost multipliers
+        exp_logger.log_dict("multipliers", cost_reducer.cost_config)
+        exp_logger.log_dict("tolerances", constraint_checker.constraint_config)
 
     return curobo_plan, overall_metrics["num_satisfying_final"], failure_reason

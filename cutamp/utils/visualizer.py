@@ -8,7 +8,7 @@
 # its affiliates is strictly prohibited.
 
 from abc import ABC, abstractmethod
-from typing import Union, Optional
+from typing import Union, Optional, Any
 
 import numpy as np
 import rerun as rr
@@ -17,7 +17,6 @@ from curobo.geom.types import Mesh
 from jaxtyping import Float
 
 from cutamp.config import TAMPConfiguration
-from cutamp.robots import load_rerun_robot
 from cutamp.tamp_world import TAMPWorld
 from cutamp.utils.obb import get_object_obb
 from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
@@ -127,12 +126,13 @@ class RerunVisualizer(Visualizer):
         self,
         config: TAMPConfiguration,
         q_init: Float[torch.Tensor, "d"],
+        rerun_robot: Any,
         application_id: str,
         recording_id: str,
         spawn: bool,
     ):
         rr.init(application_id, recording_id=recording_id, spawn=spawn)
-        self.robot = load_rerun_robot(config.robot, load_mesh=config.viz_robot_mesh)
+        self.robot = rerun_robot
         super().__init__(config, q_init)
 
     def set_time_sequence(self, timeline: str, val: int):

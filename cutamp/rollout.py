@@ -14,7 +14,7 @@ from jaxtyping import Float
 
 from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
 from cutamp.config import TAMPConfiguration
-from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, PushStick, Conf
+from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, Conf
 from cutamp.tamp_world import (
     TAMPWorld,
 )
@@ -75,9 +75,21 @@ class RolloutFunction:
         else:
             raise ValueError(f"Unsupported {config.grasp_dof=}")
 
-        # Assume placements are 4-DOF
-        if config.place_dof != 4:
+        # Place to 4x4 matrix function
+        if config.place_dof == 4:
+            self.place_to_mat4x4_fn = action_4dof_to_mat4x4
+        elif config.place_dof == 6:
+            self.place_to_mat4x4_fn = action_6dof_to_mat4x4
+        else:
             raise ValueError(f"Unsupported {config.place_dof=}")
+        
+        # Push to 4x4 matrix function
+        if config.push_dof == 4:
+            self.push_to_mat4x4_fn = action_4dof_to_mat4x4
+        elif config.push_dof == 6:
+            self.push_to_mat4x4_fn = action_6dof_to_mat4x4
+        else:
+            raise ValueError(f"Unsupported {config.push_dof=}")
 
         # Flag for first rollout, used to apply a runtime check
         self._is_first_rollout = True
@@ -204,29 +216,6 @@ class RolloutFunction:
                 action_params.append(pose_name)
                 action_to_ts[pose_name] = ts
                 action_to_pose_ts[pose_name] = pose_ts
-
-            # PushStick
-            elif op_name == PushStick.name:
-                button_name, stick_name, grasp_name, pose_name, _ = ground_op.values
-
-                # Pose is desired stick pose
-                stick_4dof = particles[pose_name]
-                world_from_stick = action_4dof_to_mat4x4(stick_4dof)
-
-                # Apply the grasp offset to get the tool frame pose
-                obj_from_grasp = get_grasp_mat4x4(grasp_name)
-                world_from_tool = world_from_stick @ obj_from_grasp
-
-                # Accumulate poses of all the movable objects as we've moved and pushing with stick
-                for obj in self.world.movables:
-                    if obj.name == stick_name:
-                        obj_to_pose[obj.name].append(world_from_stick)
-                    else:
-                        obj_to_pose[obj.name].append(current_pose(obj.name))
-                pose_ts += 1
-
-                world_from_tool_desired.append(world_from_tool)
-                gripper_close.append(True)  # close gripper at PushStick (it's still closed)
                 action_params.append(pose_name)
                 action_to_ts[pose_name] = ts
                 action_to_pose_ts[pose_name] = pose_ts

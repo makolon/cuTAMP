@@ -9,9 +9,8 @@
 
 import itertools
 import logging
-import warnings
 from functools import cached_property
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Union
 
 import torch
 from jaxtyping import Float
@@ -19,13 +18,11 @@ from jaxtyping import Float
 from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
 from curobo.geom.types import Obstacle
 from curobo.types.base import TensorDeviceType
+from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
 from cutamp.costs import sphere_to_sphere_overlap
 from cutamp.envs import TAMPEnvironment
-from cutamp.robots import RobotContainer, load_robot_container
-from cutamp.robots.franka import franka_curobo_cfg, get_franka_ik_solver
-from cutamp.robots.ur5 import ur5_curobo_cfg, get_ur5_ik_solver
-from cutamp.robots.xarm7 import xarm7_curobo_cfg, get_xarm7_ik_solver
+from cutamp.robots import RobotContainer
 from cutamp.tamp_domain import get_initial_state
 from cutamp.task_planning import State
 from cutamp.utils.collision import get_world_collision_cost
@@ -46,7 +43,7 @@ class TAMPWorld:
         self,
         env: TAMPEnvironment,
         tensor_args: TensorDeviceType,
-        robot: Union[Literal["panda", "ur5", "xarm7"], RobotContainer],
+        robot: RobotContainer,
         q_init: Float[torch.Tensor, "dof"],
         collision_activation_distance: float = 0.0,
         coll_n_spheres: int = 50,
@@ -65,29 +62,22 @@ class TAMPWorld:
         self.collision_activation_distance = collision_activation_distance
 
         # Setup robot container
-        if isinstance(robot, str):
-            warnings.warn(f"RobotContainer not provided, loading based on robot name {robot}")
-            self.robot_container = load_robot_container(robot, tensor_args)
-        else:
-            self.robot_container = robot
+        self.robot_container = robot
         self.robot_name = self.robot_container.name
         self.q_init = q_init
 
-        # Setup the IK solver, right now it needs WorldCfg and I don't know the behavior, can speed up later
-        if self.robot_name == "panda":
-            self.ik_solver = get_franka_ik_solver(self.world_cfg)
-        elif self.robot_name == "ur5":
-            self.ik_solver = get_ur5_ik_solver(self.world_cfg)
-        elif self.robot_name == "xarm7":
-            self.ik_solver = get_xarm7_ik_solver(self.world_cfg)
-        else:
-            raise ValueError(f"Unsupported robot: {self.robot_name}")
+        # Setup the robot configuration for cuRobo.
+        self.robot_cfg = self.robot_container.robot_cfg
 
         # Sample collision spheres for all movables
         self._obj_to_spheres: Dict[str, Float[torch.Tensor, "n 4"]] = {}
         for obj in self.movables:
             spheres = sample_greedy_surface_spheres(obj, n_spheres=coll_n_spheres, sphere_radius=coll_sphere_radius)
             self._obj_to_spheres[obj.name] = spheres.to(tensor_args.device)
+
+        # Setup the IK solver and Motion generator
+        self.ik_solver = self.get_ik_solver()
+        self.motion_gen = self.get_motion_gen()
 
         # AABB cache
         self._obj_to_aabb = {}
@@ -192,30 +182,41 @@ class TAMPWorld:
         else:
             raise ValueError("ik_solver must define either solve_batch or solve")
 
-    def get_motion_gen(self, collision_activation_distance: float, use_cuda_graph: bool = True) -> MotionGen:
+    def warmup_motion_gen(self):
+        """Warmup cuRobo motion generator."""
+        self.motion_gen.warmup()
+
+    def get_ik_solver(self, num_seeds: int = 12, self_collision_opt: bool = False, self_collision_check: bool = True, use_particle_opt: bool = False) -> IKSolver:
+        """Get the cuRobo IK solver for the robot."""
+
+        # World config needs to include movables for cuRobo
+        world_cfg = get_world_cfg(self.env, include_movables=True)
+        ik_config = IKSolverConfig.load_from_robot_config(
+            self.robot_cfg,
+            world_cfg,
+            num_seeds=num_seeds,
+            self_collision_opt=self_collision_opt,
+            self_collision_check=self_collision_check,
+            use_particle_opt=use_particle_opt,
+        )
+        return IKSolver(ik_config)
+
+    def get_motion_gen(self, use_cuda_graph: bool = True) -> MotionGen:
         """
         Get the cuRobo motion generator for the robot. If you're debugging, you should set `use_cuda_graph=False`
         """
-        if self.robot_name == "panda":
-            robot_cfg = franka_curobo_cfg()
-        elif self.robot_name == "ur5":
-            robot_cfg = ur5_curobo_cfg()
-        elif self.robot_name == "xarm7":
-            robot_cfg = xarm7_curobo_cfg()
-        else:
-            raise ValueError(f"Unsupported robot: {self.robot_name}")
 
         max_num_spheres = max([len(sphs) for sphs in self._obj_to_spheres.values()])
-        robot_cfg["robot_cfg"]["kinematics"]["extra_collision_spheres"]["attached_object"] = max_num_spheres
+        self.robot_cfg["robot_cfg"]["kinematics"]["extra_collision_spheres"]["attached_object"] = max_num_spheres
         _log.info(f"Setting number of spheres for attachments to {max_num_spheres}")
 
         # World config needs to include movables for cuRobo
         world_cfg = get_world_cfg(self.env, include_movables=True)
         motion_gen_cfg = MotionGenConfig.load_from_robot_config(
-            robot_cfg=robot_cfg,
+            robot_cfg=self.robot_cfg,
             world_model=world_cfg,
             use_cuda_graph=use_cuda_graph,
-            collision_activation_distance=collision_activation_distance,
+            collision_activation_distance=self.collision_activation_distance,
         )
         motion_gen = MotionGen(motion_gen_cfg)
         return motion_gen
@@ -234,7 +235,6 @@ def check_tamp_world_not_in_collision(
         coll_cost = world.collision_fn(spheres).sum()
         if coll_cost > collision_tol:
             _log.warning(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
-            # raise ValueError(f"Initial state in collision for object '{obj.name}' with cost {coll_cost}")
 
     # Catch collisions between spheres for movable objects
     obj_to_spheres = {}

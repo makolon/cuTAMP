@@ -15,20 +15,20 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 
+from curobo.types.math import Pose as CuroboPose
+
 from cutamp.utils.common import Particles
 from cutamp.config import TAMPConfiguration
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_function import CostFunction
 from cutamp.cost_reduction import CostReducer
-from curobo.types.math import Pose as CuroboPose
 from cutamp.rollout import RolloutFunction
-from cutamp.tamp_domain import Conf, Grasp, Pose, Traj
+from cutamp.tamp_domain import Conf, Pose
 from cutamp.task_planning import PlanSkeleton
 from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import Visualizer
 
 _log = logging.getLogger(__name__)
-_known_types = {Conf, Grasp, Pose, Traj}
 
 
 class PlanContainer(TypedDict):
@@ -268,12 +268,11 @@ class ParticleOptimizer:
             q = rollout["confs"][best_idx, ts]
 
             gripper_close = rollout["gripper_close"][ts]
-            if self.config.robot == "ur5":
-                gripper_joints = [0.4] if gripper_close else [0.0]
-            elif self.config.robot == "panda":
-                gripper_joints = [0.01, 0.01] if gripper_close else [0.04, 0.04]
-            else:
-                gripper_joints = []
+            gripper_joints = (
+                list(world.robot_container.visualizer_gripper_closed)
+                if gripper_close
+                else list(world.robot_container.visualizer_gripper_open)
+            )
             visualizer.set_joint_positions(q.tolist() + gripper_joints)
 
             ee_pose = CuroboPose(

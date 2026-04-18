@@ -18,17 +18,18 @@ class TAMPConfiguration:
 
     # Robot embodiment to use
     robot: Literal[
-        "panda",
-        "fr3_robotiq",
-        "ur5",
-        "panda_robotiq",
-        "fr3_franka",
+        "franka_panda",
+        "franka_robotiq_2f_85",
+        "franka_robotiq_2f_140",
+        "ur5_robotiq_2f_85",
+        "ur5_robotiq_2f_140",
         "xarm7",
-    ] = "panda"
+    ] = "franka_panda"
 
     # Grasp and Placements
     grasp_dof: Literal[4, 6] = 4
-    place_dof: Literal[4] = 4
+    place_dof: Literal[4, 6] = 4
+    push_dof: Literal[4, 6] = 4
 
     # Approach to use. Note: optimization includes particle initialization (i.e., sampling)
     approach: Literal["optimization", "sampling"] = "optimization"
@@ -122,12 +123,21 @@ class TAMPConfiguration:
 def validate_tamp_config(config: TAMPConfiguration):
     if config.num_particles <= 0:
         raise ValueError(f"num_particles must be positive, not {config.num_particles}")
-    if config.robot not in {"panda", "fr3_robotiq", "ur5", "panda_robotiq", "fr3_franka", "xarm7"}:
+    if config.robot not in {
+        "franka_panda",
+        "franka_robotiq_2f_85",
+        "franka_robotiq_2f_140",
+        "ur5_robotiq_2f_85",
+        "ur5_robotiq_2f_140",
+        "xarm7",
+    }:
         raise ValueError(f"Invalid embodiment: {config.robot}")
     if config.grasp_dof not in {4, 6}:
         raise ValueError(f"Invalid grasp_dof: {config.grasp_dof}")
-    if config.place_dof not in {4}:
+    if config.place_dof not in {4, 6}:
         raise ValueError(f"Invalid place_dof: {config.place_dof}")
+    if config.push_dof not in {4, 6}:
+        raise ValueError(f"Invalid push_dof: {config.push_dof}")
     if config.approach not in {"optimization", "sampling"}:
         raise ValueError(f"Invalid approach: {config.approach}")
     if config.num_resampling_attempts < 0:

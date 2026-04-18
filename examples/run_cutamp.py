@@ -120,8 +120,15 @@ def entrypoint():
     # Robot and grasp
     parser.add_argument(
         "--robot",
-        default="fr3_robotiq",
-        choices=["panda", "panda_robotiq", "fr3_robotiq", "ur5", "fr3_franka"],
+        default="franka_panda",
+        choices=[
+            "franka_panda",
+            "franka_robotiq_2f_85",
+            "franka_robotiq_2f_140",
+            "ur5_robotiq_2f_85",
+            "ur5_robotiq_2f_140",
+            "xarm7",
+        ],
         help="Robot to use",
     )
     parser.add_argument(

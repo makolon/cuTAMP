@@ -132,6 +132,7 @@ def curobo_to_rerun(entity: CuroboMesh, compute_vertex_normals: bool = True) -> 
         )
     return rr_mesh
 
+
 def log_curobo_pose_to_rerun(key: str, obj: Obstacle, static_transform: bool, log_arrows: bool = False):
     transform = rr.Transform3D(
         translation=obj.pose[:3],

@@ -54,13 +54,16 @@ class TAMPEnvironment:
 
     def __str__(self):
         accum = [f"Environment: {self.name}", "\tMovables:"]
+
         # Movables
         for obj in self.movables:
             accum.append(f"\t\t{obj.name}")
+
         # Statics
         accum.append("\tStatics:")
         for obj in self.statics:
             accum.append(f"\t\t{obj.name}")
+
         # Types
         accum.append("\tTypes:")
         for obj_type, objects in self.type_to_objects.items():
