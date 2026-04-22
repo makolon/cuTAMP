@@ -74,7 +74,6 @@ class ParticleInitializer:
         deferred_params = set()
         log_debug = _log.debug if verbose else lambda *args, **kwargs: None
 
-        # Note: we don't consider state after executing earlier samples
         # Iterate through each ground operator in the plan skeleton and initialize and build up particles
         for idx, ground_op in enumerate(plan_skeleton):
             op_name = ground_op.operator.name
@@ -126,40 +125,35 @@ class ParticleInitializer:
                 stream_data = self.grasp_streams.get(obj)
                 grasps_obj = stream_data.get("grasps_obj")
                 confidences_pt = stream_data.get("confidences_pt")
-                if isinstance(grasps_obj, torch.Tensor) and grasps_obj.shape[0] > 0:
-                    grasp_actions, grasp_transforms = grasp_data_to_actions(grasps_obj, config.grasp_dof)
-                    indices = sample_initializer_indices(
-                        grasp_actions.shape[0],
-                        num_particles,
-                        device=grasp_actions.device,
-                        scores=confidences_pt if isinstance(confidences_pt, torch.Tensor) else None,
-                    )
-                    particles[grasp] = grasp_actions[indices].clone()
-                    grasp_transforms = grasp_transforms[indices]
 
-                    world_from_obj = pose_list_to_mat4x4(world.get_object(obj).pose).to(world.tensor_args.device)
-                    world_from_grasp = world_from_obj @ grasp_transforms
-                    world_from_ee = world_from_grasp @ world.tool_from_ee
+                grasp_actions, grasp_transforms = grasp_data_to_actions(grasps_obj, config.grasp_dof)
+                indices = sample_initializer_indices(
+                    grasp_actions.shape[0],
+                    num_particles,
+                    device=grasp_actions.device,
+                    scores=confidences_pt if isinstance(confidences_pt, torch.Tensor) else None,
+                )
+                particles[grasp] = grasp_actions[indices].clone()
+                grasp_transforms = grasp_transforms[indices]
 
-                    # Solve IK with cuRobo
-                    ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
-                    log_debug(
-                        f"{header}. External grasp IK success: "
-                        f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
-                    )
-                    if not ik_result.success.any():
-                        log_debug(f"{header}. Pick IK failed for all particles; treating as failed subgraph")
-                        return None
+                world_from_obj = pose_list_to_mat4x4(world.get_object(obj).pose).to(world.tensor_args.device)
+                world_from_grasp = world_from_obj @ grasp_transforms
+                world_from_ee = world_from_grasp @ world.tool_from_ee
 
-                    particles[q] = ik_result.solution[:, 0]
-                    deferred_params.remove(q)
+                # Solve IK with cuRobo
+                ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
+                log_debug(
+                    f"{header}. External grasp IK success: "
+                    f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                )
+                if not ik_result.success.any():
+                    log_debug(f"{header}. Pick IK failed for all particles; treating as failed subgraph")
 
-                    if config.cache_subgraphs:
-                        self.pick_cache[obj] = {"sampled_grasps": particles[grasp], "ik_result": ik_result}
-                    continue
-                
-                log_debug(f"{header}. No valid grasp stream data found for object '{obj}'")
-                return None
+                particles[q] = ik_result.solution[:, 0]
+                deferred_params.remove(q)
+
+                if config.cache_subgraphs:
+                    self.pick_cache[obj] = {"sampled_grasps": particles[grasp], "ik_result": ik_result}
 
             # Place
             elif op_name == Place.name:
@@ -193,54 +187,50 @@ class ParticleInitializer:
                     )
                     continue
 
-                stream_data = self.place_streams.get(obj).get(surface)
+                place_stream_data = self.place_streams.get(obj)
+                stream_data = place_stream_data.get(surface)
                 placements_world = stream_data.get("placements_world")
                 support_scores_pt = stream_data.get("support_scores_pt")
-                if isinstance(placements_world, torch.Tensor) and placements_world.shape[0] > 0:
-                    sampled_placements, world_from_obj = place_data_to_actions(placements_world)
-                    indices = sample_initializer_indices(
-                        sampled_placements.shape[0],
-                        num_particles,
-                        device=sampled_placements.device,
-                        scores=support_scores_pt if isinstance(support_scores_pt, torch.Tensor) else None,
-                    )
-                    sampled_placements = sampled_placements[indices].clone()
-                    world_from_obj = world_from_obj[indices]
-                    particles[placement] = sampled_placements
 
-                    if config.random_init:
-                        q_sample = sample_between_bounds(num_particles, world.robot_container.joint_limits)
-                        particles[q] = q_sample
+                sampled_placements, world_from_obj = place_data_to_actions(placements_world)
+                indices = sample_initializer_indices(
+                    sampled_placements.shape[0],
+                    num_particles,
+                    device=sampled_placements.device,
+                    scores=support_scores_pt if isinstance(support_scores_pt, torch.Tensor) else None,
+                )
+                sampled_placements = sampled_placements[indices].clone()
+                world_from_obj = world_from_obj[indices]
+                particles[placement] = sampled_placements
+
+                if config.random_init:
+                    q_sample = sample_between_bounds(num_particles, world.robot_container.joint_limits)
+                    particles[q] = q_sample
+                else:
+                    if config.grasp_dof == 4:
+                        obj_from_grasp = action_4dof_to_mat4x4(particles[grasp])
                     else:
-                        if config.grasp_dof == 4:
-                            obj_from_grasp = action_4dof_to_mat4x4(particles[grasp])
-                        else:
-                            obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
-                        world_from_grasp = world_from_obj @ obj_from_grasp
-                        world_from_ee = world_from_grasp @ world.tool_from_ee
-                        ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
-                        log_debug(
-                            f"{header}. External place IK success: "
-                            f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
-                        )
-                        if not ik_result.success.any():
-                            log_debug(f"{header}. Place IK failed for all particles; treating as failed subgraph")
-                            return None
-                        particles[q] = ik_result.solution[:, 0]
-                    deferred_params.remove(q)
+                        obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
+                    world_from_grasp = world_from_obj @ obj_from_grasp
+                    world_from_ee = world_from_grasp @ world.tool_from_ee
+                    ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)
+                    log_debug(
+                        f"{header}. External place IK success: "
+                        f"{ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                    )
+                    if not ik_result.success.any():
+                        log_debug(f"{header}. Place IK failed for all particles; treating as failed subgraph")
+                    particles[q] = ik_result.solution[:, 0]
+                deferred_params.remove(q)
 
-                    if config.cache_subgraphs and not config.random_init:
-                        self.place_cache[(obj, surface)] = {
-                            "sampled_placements": sampled_placements,
-                            "ik_result": ik_result,
-                            "grasp": particles[grasp],
-                        }
-                    continue
+                if config.cache_subgraphs and not config.random_init:
+                    self.place_cache[(obj, surface)] = {
+                        "sampled_placements": sampled_placements,
+                        "ik_result": ik_result,
+                        "grasp": particles[grasp],
+                    }
 
-                log_debug(f"{header}. No valid placement stream data found for '{obj}' on '{surface}'")
-                return None
-
-            # Push Button
+            # Push
             elif op_name == Push.name:
                 button, push_pose, q = params
                 assert not config.random_init, "Random initialization not supported for pushing"
@@ -264,47 +254,41 @@ class ParticleInitializer:
                     continue
 
                 stream_data = self.push_streams.get(button)
-                if isinstance(stream_data, Mapping):
-                    pushes_world = stream_data.get("pushes_world")
-                    push_scores_pt = stream_data.get("push_scores_pt")
-                    if isinstance(pushes_world, torch.Tensor) and pushes_world.shape[0] > 0:
-                        sampled_push, world_from_button = push_data_to_actions(pushes_world, config.push_dof)
-                        indices = sample_initializer_indices(
-                            sampled_push.shape[0],
-                            num_particles,
-                            device=sampled_push.device,
-                            scores=push_scores_pt if isinstance(push_scores_pt, torch.Tensor) else None,
-                        )
-                        sampled_push = sampled_push[indices].clone()
-                        particles[push_pose] = sampled_push
+                pushes_world = stream_data.get("pushes_world")
+                push_scores_pt = stream_data.get("push_scores_pt")
 
-                        # Transform from tool to hand frame
-                        world_from_push = action_4dof_to_mat4x4(sampled_push) if config.push_dof == 4 else action_6dof_to_mat4x4(sampled_push)
-                        world_from_ee = world_from_push @ world.tool_from_ee
+                sampled_push, world_from_button = push_data_to_actions(pushes_world, config.push_dof)
+                indices = sample_initializer_indices(
+                    sampled_push.shape[0],
+                    num_particles,
+                    device=sampled_push.device,
+                    scores=push_scores_pt if isinstance(push_scores_pt, torch.Tensor) else None,
+                )
+                sampled_push = sampled_push[indices].clone()
+                particles[push_pose] = sampled_push
 
-                        # Solve IK with cuRobo
-                        ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)  # TODO: seeding
-                        log_debug(
-                            f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
-                        )
-                        if not ik_result.success.any():
-                            log_debug(f"{header}. Push IK failed for all particles; treating as failed subgraph")
-                            self.failed_push.add(button)
-                            return None
+                # Transform from tool to hand frame
+                world_from_push = action_4dof_to_mat4x4(sampled_push) if config.push_dof == 4 else action_6dof_to_mat4x4(sampled_push)
+                world_from_ee = world_from_push @ world.tool_from_ee
 
-                        particles[q] = ik_result.solution[:, 0]
-                        deferred_params.remove(q)
+                # Solve IK with cuRobo
+                ik_result = world.ik_solver.solve_batch(Pose.from_matrix(world_from_ee), seed_config=None)  # TODO: seeding
+                log_debug(
+                    f"{header}. IK success: {ik_result.success.sum()}/{num_particles}, took {ik_result.solve_time:.2f}s"
+                )
+                if not ik_result.success.any():
+                    log_debug(f"{header}. Push IK failed for all particles; treating as failed subgraph")
+                    self.failed_push.add(button)
 
-                        # Cache the push poses
-                        if config.cache_subgraphs:
-                            self.push_button_cache[button] = {
-                                "sampled_push": particles[push_pose],
-                                "ik_result": ik_result,
-                            }
-                        continue
+                particles[q] = ik_result.solution[:, 0]
+                deferred_params.remove(q)
 
-                log_debug(f"{header}. No valid push stream data found for button '{button}'")
-                return None
+                # Cache the push poses
+                if config.cache_subgraphs:
+                    self.push_button_cache[button] = {
+                        "sampled_push": particles[push_pose],
+                        "ik_result": ik_result,
+                    }
 
             # Unknown
             else:
