@@ -31,6 +31,55 @@ from cutamp.utils.visualizer import Visualizer
 _log = logging.getLogger(__name__)
 
 
+def _mat4_to_list(mat4: torch.Tensor) -> list[list[float]]:
+    mat = mat4.detach().cpu().float().view(4, 4)
+    return [[float(value) for value in row] for row in mat.tolist()]
+
+
+def _pose_error(actual: torch.Tensor, desired: torch.Tensor) -> tuple[float, float]:
+    actual_mat = actual.detach().cpu().float().view(4, 4)
+    desired_mat = desired.detach().cpu().float().view(4, 4)
+    translation_error = float(torch.linalg.norm(actual_mat[:3, 3] - desired_mat[:3, 3]).item())
+    delta = actual_mat[:3, :3] @ desired_mat[:3, :3].T
+    trace = float(torch.trace(delta).item())
+    cos_theta = max(-1.0, min(1.0, 0.5 * (trace - 1.0)))
+    rotation_error = float(torch.rad2deg(torch.arccos(torch.tensor(cos_theta))).item())
+    return translation_error, rotation_error
+
+
+def _segment_debug_payload(
+    *,
+    label: str,
+    segment_type: str,
+    desired_world_from_ee: torch.Tensor,
+    terminal_world_from_ee: torch.Tensor,
+    plan_positions: torch.Tensor | None = None,
+    waypoint_index_offset: int = 0,
+    selected_parameter_name: str | None = None,
+    selected_obj_from_grasp: torch.Tensor | None = None,
+    object_name: str | None = None,
+) -> dict[str, object]:
+    translation_error, rotation_error = _pose_error(terminal_world_from_ee, desired_world_from_ee)
+    payload: dict[str, object] = {
+        "label": str(label),
+        "segment_type": str(segment_type),
+        "desired_world_from_ee": _mat4_to_list(desired_world_from_ee),
+        "terminal_world_from_fk": _mat4_to_list(terminal_world_from_ee),
+        "terminal_translation_error_m": float(translation_error),
+        "terminal_rotation_error_deg": float(rotation_error),
+        "waypoint_index_offset": int(waypoint_index_offset),
+    }
+    if plan_positions is not None:
+        payload["num_waypoints"] = int(plan_positions.shape[0])
+    if selected_parameter_name:
+        payload["selected_parameter_name"] = str(selected_parameter_name)
+    if selected_obj_from_grasp is not None:
+        payload["selected_obj_from_grasp"] = _mat4_to_list(selected_obj_from_grasp)
+    if object_name:
+        payload["object_name"] = str(object_name)
+    return payload
+
+
 def solve_curobo(
     plan_info: PlanContainer,
     best_particle: Particles,
@@ -91,6 +140,7 @@ def solve_curobo(
 
     # Accumulated plans we return that the real robot can actually execute
     accum_plans = []
+    waypoint_index_offset = 0
 
     # Iterate through skeleton and motion plan
     for idx, ground_op in enumerate(plan_skeleton):
@@ -119,11 +169,12 @@ def solve_curobo(
 
             with timer.time(f"{timeline}_planning"):
                 start_js = last_js
+                world_from_start_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                world_from_retract = world_from_start_ee
 
                 # Get the retract pose and plan to it if it's not q0
                 if last_q_name != "q0":
-                    world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                    world_from_retract = world_from_ee @ approach_offset
+                    world_from_retract = world_from_start_ee @ approach_offset
                     retract_result = motion_gen.plan_single(
                         start_js, Pose.from_matrix(world_from_retract), constrained_plan_config
                     )
@@ -164,11 +215,45 @@ def solve_curobo(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
                     )
 
-            for result in [retract_result, approach_result, end_result]:
+            ik_fk = world.kin_model.get_state(best_particle[q][None]).ee_pose.get_matrix()[0]
+            ik_translation_error, ik_rotation_error = _pose_error(ik_fk, world_from_ee)
+            ik_debug = {
+                "label": ground_op.name,
+                "segment_type": "ik_pick",
+                "selected_parameter_name": str(grasp),
+                "object_name": str(obj),
+                "desired_world_from_ee": _mat4_to_list(world_from_ee),
+                "ik_world_from_fk": _mat4_to_list(ik_fk),
+                "translation_error_m": float(ik_translation_error),
+                "rotation_error_deg": float(ik_rotation_error),
+                "success": True,
+                "selected_obj_from_grasp": _mat4_to_list(obj_from_grasp),
+            }
+
+            segment_specs = [
+                ("pick_retract", retract_result, world_from_retract),
+                ("pick_approach", approach_result, world_from_approach),
+                ("pick_grasp", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
                 if result is None:
                     continue
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
+                debug_payload = _segment_debug_payload(
+                    label=ground_op.name,
+                    segment_type=segment_type,
+                    desired_world_from_ee=desired_world_from_ee,
+                    terminal_world_from_ee=terminal_world_from_fk,
+                    plan_positions=plan.position,
+                    waypoint_index_offset=waypoint_index_offset,
+                    selected_parameter_name=str(grasp),
+                    selected_obj_from_grasp=obj_from_grasp,
+                    object_name=str(obj),
+                )
+                if segment_type == "pick_retract":
+                    debug_payload["ik_debug"] = ik_debug
                 accum_plans.append(
                     {
                         "type": "trajectory",
@@ -177,10 +262,12 @@ def solve_curobo(
                         "optimized_plan": result.optimized_plan,
                         "optimized_dt": result.optimized_dt,
                         "label": ground_op.name,
+                        "debug": debug_payload,
                     }
                 )
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                waypoint_index_offset += int(plan.position.shape[0])
 
             # Temporarily monkey patch get_bounding_spheres to return the spheres we sampled
             obstacle = motion_gen.world_model.get_obstacle(obj)
@@ -318,13 +405,47 @@ def solve_curobo(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
                     )
 
+            ik_fk = world.kin_model.get_state(best_particle[q][None]).ee_pose.get_matrix()[0]
+            ik_translation_error, ik_rotation_error = _pose_error(ik_fk, world_from_ee)
+            ik_debug = {
+                "label": ground_op.name,
+                "segment_type": "ik_place",
+                "selected_parameter_name": str(grasp),
+                "object_name": str(obj),
+                "desired_world_from_ee": _mat4_to_list(world_from_ee),
+                "ik_world_from_fk": _mat4_to_list(ik_fk),
+                "translation_error_m": float(ik_translation_error),
+                "rotation_error_deg": float(ik_rotation_error),
+                "success": True,
+                "selected_obj_from_grasp": _mat4_to_list(obj_from_grasp),
+            }
+
             # Compute the offset between the object and end-effector at start of plan
             obj_from_ee = torch.inverse(obj_to_current_pose[obj]) @ world_from_ee_start
             ee_from_obj = torch.inverse(obj_from_ee)
 
-            for result in [retract_result, approach_result, end_result]:
+            segment_specs = [
+                ("place_retract", retract_result, world_from_retract),
+                ("place_approach", approach_result, world_from_approach),
+                ("place_place", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
+                debug_payload = _segment_debug_payload(
+                    label=ground_op.name,
+                    segment_type=segment_type,
+                    desired_world_from_ee=desired_world_from_ee,
+                    terminal_world_from_ee=terminal_world_from_fk,
+                    plan_positions=plan.position,
+                    waypoint_index_offset=waypoint_index_offset,
+                    selected_parameter_name=str(grasp),
+                    selected_obj_from_grasp=obj_from_grasp,
+                    object_name=str(obj),
+                )
+                if segment_type == "place_retract":
+                    debug_payload["ik_debug"] = ik_debug
                 accum_plans.append(
                     {
                         "type": "trajectory",
@@ -333,6 +454,7 @@ def solve_curobo(
                         "optimized_plan": result.optimized_plan,
                         "optimized_dt": result.optimized_dt,
                         "label": ground_op.name,
+                        "debug": debug_payload,
                     }
                 )
                 last_js = JointState.from_position(plan[-1:].position)
@@ -349,6 +471,7 @@ def solve_curobo(
                     start_time=ts,
                     dt=dt,
                 )
+                waypoint_index_offset += int(plan.position.shape[0])
 
                 # Updated pose is the last pose
                 obj_to_current_pose[obj] = world_from_obj[-1]
@@ -442,11 +565,17 @@ def solve_curobo(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
                     )
 
-            for result in [retract_result, approach_result, end_result]:
+            segment_specs = [
+                ("push_retract", retract_result, world_from_retract if retract_result is not None else world_from_ee),
+                ("push_approach", approach_result, world_from_approach),
+                ("push_execute", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
                 if result is None:
                     continue
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
                 accum_plans.append(
                     {
                         "type": "trajectory",
@@ -455,10 +584,20 @@ def solve_curobo(
                         "optimized_plan": result.optimized_plan,
                         "optimized_dt": result.optimized_dt,
                         "label": ground_op.name,
+                        "debug": _segment_debug_payload(
+                            label=ground_op.name,
+                            segment_type=segment_type,
+                            desired_world_from_ee=desired_world_from_ee,
+                            terminal_world_from_ee=terminal_world_from_fk,
+                            plan_positions=plan.position,
+                            waypoint_index_offset=waypoint_index_offset,
+                            selected_parameter_name=str(pose),
+                        ),
                     }
                 )
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                waypoint_index_offset += int(plan.position.shape[0])
 
         # Unsupported
         else:
@@ -482,10 +621,19 @@ def solve_curobo(
             "optimized_plan": result.optimized_plan,
             "optimized_dt": result.optimized_dt,
             "label": "GoToInitial(q0)",
+            "debug": _segment_debug_payload(
+                label="GoToInitial(q0)",
+                segment_type="return_retract",
+                desired_world_from_ee=world_from_retract,
+                terminal_world_from_ee=world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0],
+                plan_positions=plan.position,
+                waypoint_index_offset=waypoint_index_offset,
+            ),
         }
     )
     last_js = JointState.from_position(plan[-1:].position)
     ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+    waypoint_index_offset += int(plan.position.shape[0])
 
     # Plan to go home at the end which we'll assume is q0
     q_last = last_js.position[0]
@@ -507,6 +655,12 @@ def solve_curobo(
             "optimized_plan": result.optimized_plan,
             "optimized_dt": result.optimized_dt,
             "label": "GoToInitial(q0)",
+            "debug": {
+                "label": "GoToInitial(q0)",
+                "segment_type": "go_home_joint",
+                "waypoint_index_offset": int(waypoint_index_offset),
+                "num_waypoints": int(plan.position.shape[0]),
+            },
         }
     )
     _ = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)

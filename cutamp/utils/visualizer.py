@@ -131,7 +131,8 @@ class RerunVisualizer(Visualizer):
         recording_id: str,
         spawn: bool,
     ):
-        rr.init(application_id, recording_id=recording_id, spawn=spawn)
+        if config.rr_init:
+            rr.init(application_id, recording_id=recording_id, spawn=spawn)
         self.robot = rerun_robot
         super().__init__(config, q_init)
 

@@ -113,6 +113,8 @@ class TAMPConfiguration:
     viz_robot_mesh: bool = True
     # Spawn the rerun visualizer
     rr_spawn: bool = True
+    # Initialize a fresh rerun recording inside cuTAMP. Set to False when the caller already did it.
+    rr_init: bool = True
 
     ## Logging Args
     enable_experiment_logging: bool = True
