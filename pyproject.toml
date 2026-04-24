@@ -51,9 +51,6 @@ dev = [
 line-length = 120
 exclude = ["cutamp/robots/assets"]
 
-[project.scripts]
-cutamp-demo = "cutamp.scripts.run_cutamp:entrypoint"
-
 [tool.setuptools.packages]
 find = { include = ["cutamp", "cutamp.*"] }
 

@@ -19,8 +19,8 @@ from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment, get_env_dir, load_env
-from envs import load_book_shelf_env, load_stick_button_env, load_tetris_env
-from utils import (
+from .envs import load_book_shelf_env, load_stick_button_env, load_tetris_env
+from .utils import (
     default_constraint_to_mult,
     default_constraint_to_tol,
     setup_logging,
