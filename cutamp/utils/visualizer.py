@@ -13,12 +13,13 @@ from typing import Union, Optional, Any
 import numpy as np
 import rerun as rr
 import torch
-from curobo.geom.types import Mesh
+from curobo.scene import Mesh
 from jaxtyping import Float
 
 from cutamp.config import TAMPConfiguration
 from cutamp.tamp_world import TAMPWorld
 from cutamp.utils.obb import get_object_obb
+from cutamp.utils.common import filter_valid_spheres
 from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
 
 
@@ -189,7 +190,9 @@ class RerunVisualizer(Visualizer):
 
     def log_spheres(self, name: str, spheres: Float[torch.Tensor, "n 4"]):
         if isinstance(spheres, torch.Tensor):
-            spheres = spheres.detach().cpu()
+            spheres = filter_valid_spheres(spheres).detach().cpu()
+        else:
+            spheres = filter_valid_spheres(torch.as_tensor(spheres)).cpu()
         rr.log(name, rr.Points3D(positions=spheres[:, :3], radii=spheres[:, 3]))
 
     def log_scalar(self, name: str, value: float):

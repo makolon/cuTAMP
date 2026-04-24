@@ -3,12 +3,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import roma
 import torch
 from jaxtyping import Float
 
-from curobo.geom.transform import quaternion_to_matrix, matrix_to_quaternion
-from curobo.geom.types import Obstacle, Cuboid
-from curobo.types.base import TensorDeviceType
+from curobo.scene import Cuboid, Obstacle
+from curobo.types import DeviceCfg
 from cutamp.utils.common import transform_points
 from cutamp.utils.shapes import MultiSphere
 
@@ -43,7 +43,8 @@ class OrientedBoundingBox(torch.nn.Module):
     @cached_property
     def rot_matrix(self) -> Float[torch.Tensor, "3 3"]:
         """Get the rotation matrix from OBB local frame to world frame (cached)."""
-        return quaternion_to_matrix(self.quat_wxyz[None])[0]
+        quat_xyzw = roma.quat_wxyz_to_xyzw(self.quat_wxyz)
+        return roma.unitquat_to_rotmat(quat_xyzw)
 
     @cached_property
     def rot_matrix_inv(self) -> Float[torch.Tensor, "3 3"]:
@@ -58,12 +59,13 @@ def get_object_obb(obj: Obstacle, shrink_dist: Optional[float] = None) -> Orient
     """
     if isinstance(obj, (Cuboid, MultiSphere)):
         obj = obj.get_mesh()
-    tensor_args = TensorDeviceType()
-    mat4x4 = torch.eye(4, device=tensor_args.device)
-    mat4x4[:3, 3] = tensor_args.to_device(obj.pose[:3])
-    mat4x4[:3, :3] = quaternion_to_matrix(tensor_args.to_device(obj.pose[3:])[None])[0]
+    device_cfg = DeviceCfg()
+    mat4x4 = torch.eye(4, device=device_cfg.device)
+    mat4x4[:3, 3] = device_cfg.to_device(obj.pose[:3])
+    quat_xyzw = roma.quat_wxyz_to_xyzw(device_cfg.to_device(obj.pose[3:]))
+    mat4x4[:3, :3] = roma.unitquat_to_rotmat(quat_xyzw)
 
-    vertices_world = transform_points(points=tensor_args.to_device(obj.vertices), transform=mat4x4)
+    vertices_world = transform_points(points=device_cfg.to_device(obj.vertices), transform=mat4x4)
 
     # Fit a 2D rectangle to the xy vertices
     vertices_xy = vertices_world[:, :2].cpu().numpy().astype(np.float32)
@@ -84,15 +86,16 @@ def get_object_obb(obj: Obstacle, shrink_dist: Optional[float] = None) -> Orient
     z_len = z_max - z_min
     cz = (z_max + z_min) / 2.0
 
-    center = tensor_args.to_device([cx, cy, cz])
-    extents = tensor_args.to_device([x_len, y_len, z_len])
+    center = device_cfg.to_device([cx, cy, cz])
+    extents = device_cfg.to_device([x_len, y_len, z_len])
 
     # OBB rotation matrix (z-axis rotation)
     cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
     mat3x3 = np.array([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    mat3x3 = tensor_args.to_device(mat3x3)
+    mat3x3 = device_cfg.to_device(mat3x3)
 
-    quat_wxyz = matrix_to_quaternion(mat3x3[None])[0]
+    quat_xyzw = roma.rotmat_to_unitquat(mat3x3)
+    quat_wxyz = torch.cat([quat_xyzw[-1:], quat_xyzw[:-1]], dim=0)
     surface_z = z_max
 
     half_extents = extents / 2

@@ -19,10 +19,8 @@ import trimesh
 from _heapq import heappush, heappop
 from jaxtyping import Float
 
-from curobo.geom.sphere_fit import SphereFitType
-from curobo.geom.types import Obstacle, Sphere
-from curobo.types.base import TensorDeviceType
-from curobo.types.math import Pose
+from curobo.scene import Obstacle, Sphere
+from curobo.types import DeviceCfg, Pose
 
 _log = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ class MultiSphere(Obstacle):
 
     def __post_init__(self):
         # Check spheres is not empty and (n, 4)
-        self.spheres = self.spheres.to(self.tensor_args.device)
+        self.spheres = self.spheres.to(self.device_cfg.device)
         if len(self.spheres) == 0:
             raise ValueError("Spheres must not be empty")
         if self.spheres.ndim != 2 or self.spheres.shape[1] != 4:
@@ -92,23 +90,23 @@ class MultiSphere(Obstacle):
         self,
         n_spheres: int = 1,
         surface_sphere_radius: float = 0.002,
-        fit_type: SphereFitType = SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+        fit_type: object | None = None,
         voxelize_method: str = "ray",
         pre_transform_pose: Optional[Pose] = None,
-        tensor_args: TensorDeviceType = TensorDeviceType(),
+        device_cfg: DeviceCfg = DeviceCfg(),
     ) -> List[Sphere]:
         """Use the ground truth spheres as the bounding spheres. Ignores most of the arguments."""
         pts = self.spheres[:, :3].cpu().numpy()
         n_radius = self.spheres[:, 3].cpu().numpy()
 
-        obj_pose = Pose.from_list(self.pose, tensor_args)
+        obj_pose = Pose.from_list(self.pose, device_cfg)
         if pre_transform_pose is not None:
             obj_pose = pre_transform_pose.multiply(obj_pose)  # convert object pose to another frame
 
         if pts is None or len(pts) == 0:
             raise ValueError("No points found from the spheres")
 
-        points_cuda = tensor_args.to_device(pts)
+        points_cuda = device_cfg.to_device(pts)
         pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
 
         new_spheres = [
@@ -126,7 +124,7 @@ def sample_collision_spheres(
     obj: Obstacle,
     n_spheres: int = 50,
     surface_sphere_radius: float = 0.005,
-    fit_type: SphereFitType = SphereFitType.VOXEL_VOLUME_SAMPLE_SURFACE,
+    fit_type: object | None = None,
     voxelize_method: str = "subdivide",
 ) -> Float[torch.Tensor, "n 4"]:
     """Sample spheres for collision checking using cuRobo. Note the spheres will be in the object's frame."""
@@ -134,10 +132,8 @@ def sample_collision_spheres(
     og_pose = obj.pose
     obj.pose = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]  # unit pose
     sph_objs = obj.get_bounding_spheres(
-        n_spheres=n_spheres,
-        fit_type=fit_type,
-        voxelize_method=voxelize_method,
-        surface_sphere_radius=surface_sphere_radius,
+        num_spheres=n_spheres,
+        surface_radius=surface_sphere_radius,
     )
     obj.pose = og_pose
 

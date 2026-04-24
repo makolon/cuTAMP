@@ -89,15 +89,16 @@ sudo apt install git-lfs
 git lfs install
 ```
 
-Then clone and install the TiPToP-compatible cuRobo fork:
+Then clone and install the cuRobo v2 revision used by this repository:
 
 ```bash
-git clone https://github.com/williamshen-nz/curobo.git
+git clone https://github.com/NVlabs/curobo.git
 cd curobo
-git checkout b5fad1df2a3ac4d3e33e369918b7d62d0e59ebd1
+git checkout ca941586c33b8482ed9c0e74d60f23efd64b516a
 
 # This can take up to 20 minutes to install
 pip install -e . --no-build-isolation
+pip install "warp-lang==1.12.1"
 
 # Optional: Verify that all unit tests pass
 pip install pytest
@@ -230,7 +231,7 @@ cutamp-demo --env stick_button --robot ur5 --num_initial_plans 100 --cache_subgr
 ## Troubleshooting
 
 If you encounter any issues not covered below,
-please [open an issue](https://github.com/williamshen-nz/cutamp-clean/issues/new).
+please [open an issue](https://github.com/NVlabs/cuTAMP/issues/new).
 Make sure to describe your setup and detail the problem you're facing.
 
 ### Running out of GPU Memory
@@ -275,7 +276,7 @@ You can try installing `GLIBCXX` via conda:
 conda install -c conda-forge libstdcxx-ng -y
 ```
 
-### `Failed to find backward kernel 'compute_matrix_to_quat'` or `'compute_quat_to_matrix'`
+### Legacy cuRobo v1 kernel mismatch
 
 If you see an error like this during `loss.backward()`:
 
@@ -284,8 +285,8 @@ RuntimeError: Failed to find backward kernel 'compute_matrix_to_quat' from modul
 RuntimeError: Failed to find backward kernel 'compute_quat_to_matrix' from module 'curobo.geom.transform'
 ```
 
-the most common cause is a runtime mismatch where cuRobo is imported from one environment while Warp is imported
-from another provider (for example Isaac Sim's `omni.warp.core` extension path).
+the most common cause is a runtime mismatch where a legacy cuRobo v1 install is imported from one environment while Warp is imported
+from another provider (for example Isaac Sim's `omni.warp.core` extension path). This repository now targets cuRobo v2, so treat this as a mixed-install symptom rather than an expected runtime path.
 
 First, check what is actually imported at runtime:
 

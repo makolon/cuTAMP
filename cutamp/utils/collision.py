@@ -8,53 +8,100 @@
 # its affiliates is strictly prohibited.
 
 import logging
+from collections.abc import Callable
 
-from curobo.geom.sdf.utils import create_collision_checker
-from curobo.geom.sdf.world import WorldPrimitiveCollision, WorldCollisionConfig
-from curobo.geom.types import WorldConfig
-from curobo.rollout.cost.primitive_collision_cost import PrimitiveCollisionCost, PrimitiveCollisionCostConfig
-from curobo.types.base import TensorDeviceType
+import torch
+from curobo.scene import Cuboid, Scene
+from curobo.types import DeviceCfg
 
+from cutamp.utils.common import pose_list_to_mat4x4
 
 _log = logging.getLogger(__name__)
 
 
-def get_collision_checker(
-    world_config: WorldConfig, tensor_args: TensorDeviceType, max_distance: float | None = 0.1
-) -> WorldPrimitiveCollision:
-    """Create primitive cuRobo collision checker"""
-    # We use cuRobo's cuboid collision checker which is a lot faster (i.e., sacrifice precision for speed)
-    # This mean's we need to convert the world into oriented bounding boxes (obb)
-    cuboid_world = WorldConfig.create_obb_world(world_config)
-    _log.debug(f"Created cuboid world for WorldConfig with {len(world_config)} objects")
-    coll_dict = {"checker_type": "PRIMITIVE"}
-    if max_distance is not None:
-        coll_dict["max_distance"] = max_distance
+def _obb_cuboids(world_scene: Scene) -> tuple[Cuboid, ...]:
+    obb_scene = Scene.create_obb_world(world_scene)
+    cuboids = tuple(getattr(obb_scene, "cuboid", ()) or ())
+    _log.debug("Created OBB world with %d cuboids", len(cuboids))
+    return cuboids
 
-    collision_config = WorldCollisionConfig.load_from_dict(coll_dict, cuboid_world, tensor_args)
-    collision_checker = create_collision_checker(collision_config)
-    _log.debug(f"Created {collision_checker.__class__.__name__} collision checker")
-    return collision_checker
+
+def _sphere_cuboid_signed_distance(
+    *,
+    sphere_centers_world: torch.Tensor,
+    sphere_radii: torch.Tensor,
+    cuboid: Cuboid,
+    device_cfg: DeviceCfg,
+) -> torch.Tensor:
+    world_from_cuboid = pose_list_to_mat4x4(cuboid.pose).to(
+        device=sphere_centers_world.device,
+        dtype=sphere_centers_world.dtype,
+    )
+    cuboid_center = world_from_cuboid[:3, 3]
+    cuboid_rot = world_from_cuboid[:3, :3]
+    cuboid_half_extents = device_cfg.to_device(cuboid.dims).to(
+        device=sphere_centers_world.device,
+        dtype=sphere_centers_world.dtype,
+    ) * 0.5
+
+    centers_local = (sphere_centers_world - cuboid_center) @ cuboid_rot
+    delta = centers_local.abs() - cuboid_half_extents
+    outside = torch.relu(delta)
+    outside_distance = torch.linalg.norm(outside, dim=-1)
+    inside_distance = torch.clamp(delta.max(dim=-1).values, max=0.0)
+    return outside_distance + inside_distance - sphere_radii
 
 
 def get_world_collision_cost(
-    world_config: WorldConfig, tensor_args: TensorDeviceType, collision_activation_distance: float, weight: float = 1.0
-) -> PrimitiveCollisionCost:
-    """
-    Get the PrimitiveCollisionCost for a given world config. The activation distance is the distance from which the SDF
-    query will return a positive value. This can be used for "safer" trajectories.
-    """
-    if collision_activation_distance < 0.0:
-        raise ValueError(f"Collision activation distance must be >= 0.0, not {collision_activation_distance}")
+    world_scene: Scene,
+    device_cfg: DeviceCfg,
+    collision_activation_distance: float,
+    weight: float = 1.0,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Return a differentiable sphere-vs-static-world collision cost.
 
-    world_collision_checker = get_collision_checker(world_config, tensor_args)
-    collision_cost_config = PrimitiveCollisionCostConfig(
-        tensor_args.to_device([weight]),
-        tensor_args,
-        return_loss=True,
-        world_coll_checker=world_collision_checker,
-        activation_distance=collision_activation_distance,
-    )
-    world_collision_cost = PrimitiveCollisionCost(collision_cost_config)
-    _log.debug(f"Created {world_collision_cost} with activation distance {collision_activation_distance}")
-    return world_collision_cost
+    The input tensor must have shape ``[batch, horizon, num_spheres, 4]``.
+    The output tensor has shape ``[batch, horizon]`` and sums collision
+    penalties across all spheres and all static OBB approximations.
+    """
+
+    if collision_activation_distance < 0.0:
+        raise ValueError(
+            f"Collision activation distance must be >= 0.0, not {collision_activation_distance}"
+        )
+
+    cuboids = _obb_cuboids(world_scene)
+
+    def collision_cost(spheres_world: torch.Tensor) -> torch.Tensor:
+        if spheres_world.ndim != 4 or spheres_world.shape[-1] != 4:
+            raise ValueError(
+                "Expected spheres_world with shape [batch, horizon, num_spheres, 4], "
+                f"got {tuple(spheres_world.shape)}"
+            )
+        batch, horizon, _, _ = spheres_world.shape
+        if not cuboids:
+            return torch.zeros(
+                (batch, horizon),
+                device=spheres_world.device,
+                dtype=spheres_world.dtype,
+            )
+
+        sphere_centers = spheres_world[..., :3]
+        sphere_radii = spheres_world[..., 3]
+        total_cost = torch.zeros(
+            (batch, horizon),
+            device=spheres_world.device,
+            dtype=spheres_world.dtype,
+        )
+        for cuboid in cuboids:
+            signed_distance = _sphere_cuboid_signed_distance(
+                sphere_centers_world=sphere_centers,
+                sphere_radii=sphere_radii,
+                cuboid=cuboid,
+                device_cfg=device_cfg,
+            )
+            penalty = torch.relu(collision_activation_distance - signed_distance) * weight
+            total_cost = total_cost + penalty.sum(dim=-1)
+        return total_cost
+
+    return collision_cost

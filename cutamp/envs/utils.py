@@ -13,7 +13,7 @@ from typing import Dict, List, ClassVar, Set, Tuple
 
 import torch
 import yaml
-from curobo.geom.types import Cuboid, Obstacle, Cylinder, Mesh
+from curobo.scene import Cuboid, Cylinder, Mesh, Obstacle
 
 from cutamp.tamp_domain import all_tamp_fluents
 from cutamp.utils.shapes import MultiSphere

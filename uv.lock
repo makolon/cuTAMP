@@ -429,7 +429,7 @@ dev = [
 requires-dist = [
     { name = "einops" },
     { name = "jaxtyping" },
-    { name = "nvidia-curobo", git = "https://github.com/williamshen-nz/curobo.git" },
+    { name = "nvidia-curobo", git = "https://github.com/NVlabs/curobo?rev=ca941586c33b8482ed9c0e74d60f23efd64b516a" },
     { name = "omegaconf" },
     { name = "open3d" },
     { name = "opencv-python" },
@@ -442,6 +442,7 @@ requires-dist = [
     { name = "tqdm" },
     { name = "transformers", specifier = ">=5.4.0" },
     { name = "trimesh" },
+    { name = "warp-lang", specifier = "==1.12.1" },
     { name = "yourdfpy" },
 ]
 provides-extras = ["dev"]
@@ -1786,25 +1787,20 @@ wheels = [
 
 [[package]]
 name = "nvidia-curobo"
-version = "0.0.post1.dev67"
-source = { git = "https://github.com/williamshen-nz/curobo.git#b5fad1df2a3ac4d3e33e369918b7d62d0e59ebd1" }
+version = "0.8.0.post1.dev2"
+source = { git = "https://github.com/NVlabs/curobo#ca941586c33b8482ed9c0e74d60f23efd64b516a" }
 dependencies = [
     { name = "importlib-resources" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "matplotlib" },
+    { name = "networkx" },
+    { name = "numpy" },
     { name = "numpy-quaternion" },
-    { name = "pybind11" },
     { name = "pyyaml" },
-    { name = "scikit-image", version = "0.25.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy" },
     { name = "setuptools-scm" },
-    { name = "torch" },
     { name = "tqdm" },
     { name = "trimesh" },
+    { name = "viser" },
     { name = "warp-lang" },
     { name = "wheel" },
     { name = "yourdfpy" },

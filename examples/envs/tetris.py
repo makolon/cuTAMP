@@ -10,8 +10,8 @@
 from typing import Literal, Optional
 
 import torch
-from curobo.geom.types import Cuboid
-from curobo.types.base import TensorDeviceType
+from curobo.scene import Cuboid
+from curobo.types import DeviceCfg
 from jaxtyping import Float
 from roma import euler_to_unitquat
 
@@ -40,7 +40,7 @@ _shape_coords = {
 def _create_tetris_spheres(
     shape: str,
     sph_radius: float,
-    tensor_args: Optional[TensorDeviceType] = None,
+    device_cfg: Optional[DeviceCfg] = None,
 ) -> Float[torch.Tensor, "n 4"]:
     if shape not in _shape_coords:
         raise ValueError(f"Invalid shape: {shape}")
@@ -54,9 +54,9 @@ def _create_tetris_spheres(
     spheres.append([0.0, 0.0, sph_radius * 1.25, sph_radius / 2])
     spheres.append([0.0, 0.0, sph_radius * 2, sph_radius / 2])
 
-    if tensor_args is None:
-        tensor_args = TensorDeviceType()
-    spheres = tensor_args.to_device(spheres)
+    if device_cfg is None:
+        device_cfg = DeviceCfg()
+    spheres = device_cfg.to_device(spheres)
 
     # Shift the sphere z-positions
     z_offset = -spheres[-1][2]
@@ -78,7 +78,7 @@ def load_tetris_env(
     enable_walls: bool = True,
     wall_height: float = 0.045,
     random_yaws: bool = False,
-    tensor_args: TensorDeviceType = TensorDeviceType(),
+    device_cfg: DeviceCfg = DeviceCfg(),
 ) -> TAMPEnvironment:
     """Tetris scenario with either 1, 3 or 5 blocks and the corresponding goal region."""
     if num_blocks not in {1, 2, 3, 5}:
@@ -88,8 +88,8 @@ def load_tetris_env(
     table = Cuboid(name="table", dims=[1.1, 1.5, 0.02], pose=[0.15, 0.0, -0.011, *unit_quat], color=[235, 196, 145])
 
     # Create spheres for the blocks
-    L_sphs = _create_tetris_spheres("L", sph_radius, tensor_args)
-    O_sphs = _create_tetris_spheres("O", sph_radius, tensor_args)
+    L_sphs = _create_tetris_spheres("L", sph_radius, device_cfg)
+    O_sphs = _create_tetris_spheres("O", sph_radius, device_cfg)
     L_block_z = -(L_sphs[:, 2] - L_sphs[:, 3]).min().item() + 1e-2
     O_block_z = -(O_sphs[:, 2] - O_sphs[:, 3]).min().item() + 1e-2
 

@@ -8,7 +8,7 @@
 # its affiliates is strictly prohibited.
 
 import torch
-from curobo.geom.types import Cuboid
+from curobo.scene import Cuboid
 
 from cutamp.envs.utils import unit_quat, TAMPEnvironment
 from cutamp.tamp_domain import ButtonPushed, HandEmpty

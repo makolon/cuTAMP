@@ -95,6 +95,8 @@ class TAMPConfiguration:
     enable_traj: bool = False
     # Motion plan with cuRobo after optimization
     curobo_plan: bool = False
+    # Motion refinement target space for cuRobo.
+    motion_refinement_mode: Literal["ee_strict", "joint"] = "ee_strict"
     # Max satisfying particles to try motion refinement on per skeleton (None = try all)
     max_motion_refine_attempts: Optional[int] = None
     # For slowing down cuRobo motion plans (0.5 is safe on the real robot)
@@ -174,6 +176,8 @@ def validate_tamp_config(config: TAMPConfiguration):
         raise ValueError(f"movable_activation_distance must be non-negative, not {config.movable_activation_distance}")
 
     # Motion refinement
+    if config.motion_refinement_mode not in {"ee_strict", "joint"}:
+        raise ValueError(f"Invalid motion_refinement_mode: {config.motion_refinement_mode}")
     if config.max_motion_refine_attempts is not None and config.max_motion_refine_attempts <= 0:
         raise ValueError(f"max_motion_refine_attempts must be positive or None, not {config.max_motion_refine_attempts}")
 

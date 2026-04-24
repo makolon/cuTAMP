@@ -177,6 +177,12 @@ def entrypoint():
         default=None,
         help="Max satisfying particles to try motion refinement on per skeleton. None = try all.",
     )
+    parser.add_argument(
+        "--motion-refinement-mode",
+        choices=("ee_strict", "joint"),
+        default=None,
+        help="Optional override for cuTAMP motion refinement mode.",
+    )
 
     # Visualization and logging
     parser.add_argument(
@@ -250,7 +256,7 @@ def entrypoint():
 
     # We only expose a subset of the full TAMPConfiguration. Check config.py for the full configuration.
     args = parser.parse_args()
-    config = TAMPConfiguration(
+    config_kwargs = dict(
         num_particles=args.num_particles,
         robot=args.robot,
         grasp_dof=args.grasp_dof,
@@ -274,6 +280,9 @@ def entrypoint():
         placement_shrink_dist=args.placement_shrink_dist,
         prop_satisfying_break=args.prop_satisfying_break if args.prop_satisfying_break > 0 else None,
     )
+    if args.motion_refinement_mode is not None:
+        config_kwargs["motion_refinement_mode"] = args.motion_refinement_mode
+    config = TAMPConfiguration(**config_kwargs)
     validate_tamp_config(config)
 
     # Load env and run demo

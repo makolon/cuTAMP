@@ -13,15 +13,16 @@ from typing import Dict
 
 import roma
 import torch
-from curobo.geom.types import (
+from curobo.scene import (
     Capsule,
     Cuboid,
     Cylinder,
     Mesh,
     Obstacle,
+    Scene,
     Sphere,
-    WorldConfig,
 )
+from curobo.types import DeviceCfg
 from einops import einsum
 from jaxtyping import Float
 from roma import quat_wxyz_to_xyzw, unitquat_to_rotmat
@@ -32,6 +33,20 @@ from cutamp.utils.shapes import MultiSphere
 _log = logging.getLogger(__name__)
 
 Particles = Dict[str, Float[torch.Tensor, "num_particles *h d"]]
+
+
+def filter_valid_spheres(spheres: Float[torch.Tensor, "*batch n 4"]) -> Float[torch.Tensor, "*batch m 4"]:
+    """Drop cuRobo placeholder spheres (radius <= 0) while preserving batch dimensions."""
+    if spheres.ndim < 2 or spheres.shape[-1] != 4:
+        raise ValueError(f"Expected sphere tensor with shape (..., n, 4), got {tuple(spheres.shape)}")
+
+    valid = spheres[..., 3] > 0.0
+    if valid.ndim == 1:
+        sphere_mask = valid
+    else:
+        reduce_dims = tuple(range(valid.ndim - 1))
+        sphere_mask = valid.any(dim=reduce_dims)
+    return spheres[..., sphere_mask, :].contiguous()
 
 
 def pose_list_to_mat4x4(pose: list[float] | None) -> Float[torch.Tensor, "4 4"]:
@@ -97,7 +112,7 @@ def transform_spheres(
 
     out_spheres = einsum(transform, centers_hom, "... i j, ... j -> ... i")
     out_spheres[..., 3] = radii
-    return out_spheres
+    return out_spheres.contiguous()
 
 
 def transform_points(
@@ -156,8 +171,8 @@ def approximate_goal_aabb(goal: Obstacle) -> Float[torch.Tensor, "2 3"]:
     return aabb
 
 
-def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> WorldConfig:
-    """Get the cuRobo WorldConfig from the TAMP environment."""
+def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> Scene:
+    """Get the cuRobo scene description from the TAMP environment."""
 
     from cutamp.utils.obb import get_object_obb
 
@@ -179,7 +194,7 @@ def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> World
             geoms["mesh"].append(obj)
         else:
             raise ValueError(f"Unknown object type: {type(obj)}")
-    world_cfg = WorldConfig(**geoms)
+    world_cfg = Scene(**geoms)
 
     # IMPORTANT! We monkey patch the get_cuboid on mesh because cuRobo's implementation is super wacky.
     # This makes it an issue when motion planning as the default OBBs can be significant over-approximations.
@@ -197,7 +212,7 @@ def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> World
             color=mesh.color,
             texture=mesh.texture,
             material=mesh.material,
-            tensor_args=mesh.tensor_args,
+            device_cfg=mesh.device_cfg,
         )
 
         # Monkey patch: replace get_cuboid to return our custom cuboid

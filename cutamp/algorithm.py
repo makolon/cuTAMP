@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import torch
-from curobo.types.base import TensorDeviceType
+from curobo.types import DeviceCfg
 
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
@@ -64,10 +64,20 @@ def heuristic_fn(
                 assert num_particles == mask.shape[0]
 
             # replace zeros with -num_particles
-            satisfying[satisfying == 0] = -num_particles
-            successes.extend(satisfying.tolist())
+            if not isinstance(satisfying, torch.Tensor):
+                satisfying = torch.as_tensor(satisfying, device=mask.device)
+            satisfying = torch.where(
+                satisfying == 0,
+                torch.full_like(satisfying, -num_particles),
+                satisfying,
+            )
+            if satisfying.ndim == 0:
+                successes.append(satisfying.item())
+            else:
+                successes.extend(satisfying.tolist())
             if verbose:
-                _log.debug(f"{con_type} {name} {satisfying.tolist()}")
+                log_values = satisfying.item() if satisfying.ndim == 0 else satisfying.tolist()
+                _log.debug(f"{con_type} {name} {log_values}")
     success_mean = sum(successes) / len(successes)
     success_rate = success_mean / num_particles
     failure_rate = 1 - success_rate
@@ -279,22 +289,24 @@ def setup_cutamp(
         exp_logger.save_env(env)
 
     # Loading robot can be done offline, so doesn't count towards timing
-    tensor_args = TensorDeviceType()
+    device_cfg = DeviceCfg()
     if q_init is None:
         raise ValueError("q_init must be provided")
-    q_init = tensor_args.to_device(q_init)
+    q_init = device_cfg.to_device(q_init)
 
     # Load TAMP world and warmup IK solver
     timer = TorchTimer()
     with timer.time("load_tamp_world", log_callback=_log.info):
         world = TAMPWorld(
             env,
-            tensor_args,
+            device_cfg,
             robot=robot_container,
             q_init=q_init,
+            ik_max_batch_size=config.num_particles,
             collision_activation_distance=config.world_activation_distance,
             coll_n_spheres=config.coll_n_spheres,
             coll_sphere_radius=config.coll_sphere_radius,
+            motion_refinement_mode=config.motion_refinement_mode,
         )
         check_tamp_world_not_in_collision(world, movable_activation_dist=config.movable_activation_distance)
 

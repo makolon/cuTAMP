@@ -2,13 +2,15 @@ from dataclasses import dataclass
 
 import torch
 from jaxtyping import Float
-from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
+from curobo.kinematics import Kinematics
 
 
 @dataclass(frozen=True)
 class RobotContainer:
     name: str
-    kin_model: CudaRobotModel
+    kinematics: Kinematics
+    joint_names: tuple[str, ...]
+    tool_frame: str
     joint_limits: Float[torch.Tensor, "2 d"]
     # Note: in tool frame, not end-effector
     gripper_spheres: Float[torch.Tensor, "n 4"]

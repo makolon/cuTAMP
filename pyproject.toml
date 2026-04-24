@@ -34,10 +34,12 @@ dependencies = [
     "torch==2.7.0",
     "torchaudio==2.7.0",
     "torchvision==0.22.0",
+    "warp-lang==1.12.1",
     # VLM stacks
     "transformers>=5.4.0",
     # Third-party integrations
     "nvidia-curobo",
+    "cuda-core[cu12]>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -69,8 +71,8 @@ torchaudio = { index = "torch" }
 torch = { index = "torch" }
 torchvision = { index = "torch" }
 
-# Git sources
-nvidia-curobo = { git = "https://github.com/williamshen-nz/curobo.git" }
+# Local sources
+nvidia-curobo = { git = "https://github.com/makolon/curobo.git" }
 
 [[tool.uv.index]]
 explicit = true

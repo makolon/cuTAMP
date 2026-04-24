@@ -9,7 +9,7 @@
 
 from typing import Tuple, List
 
-from curobo.geom.types import Cuboid
+from curobo.scene import Cuboid
 
 from cutamp.envs.utils import unit_quat, TAMPEnvironment
 from cutamp.tamp_domain import On, HandEmpty

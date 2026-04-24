@@ -51,10 +51,14 @@ class TorchTimer:
     @contextmanager
     def time(self, metric: str, log_callback=None):
         self.start(metric)
-        yield
-        duration = self.stop(metric)
-        if log_callback is not None:
-            log_callback(f"{metric} took {duration:.2f}s")
+        duration = None
+        try:
+            yield
+        finally:
+            if metric in self._start_time:
+                duration = self.stop(metric)
+                if log_callback is not None:
+                    log_callback(f"{metric} took {duration:.2f}s")
 
     def get_summary(self, metric: str) -> Dict[str, float]:
         """Get summary timing statistics for a given metric."""
