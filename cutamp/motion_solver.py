@@ -731,7 +731,6 @@ def solve_curobo(
                 obj_to_current_pose[obj] = world_from_obj_path[-1]
 
             with timer.time(f"{timeline}_planning"):
-                world.detach_attached_object(enable_obstacle_names=[obj])
                 world.update_object_pose(obj, obj_to_current_pose[obj])
             ts = _append_gripper_step(
                 accum_plans=accum_plans,

@@ -41,8 +41,8 @@ def _collect_git_info() -> dict:
         )
         dirty = bool(porcelain.strip())
         return {"commit": commit, "dirty": dirty, "porcelain": porcelain.strip() if dirty else None}
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        _log.warning("Failed to collect git info", exc_info=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        _log.warning("Git metadata unavailable for this experiment: %s", exc)
         return {"commit": None, "dirty": None, "porcelain": None}
 
 
@@ -56,8 +56,8 @@ def _get_git_diff() -> str | None:
             text=True,
         )
         return diff if diff else None
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        _log.warning("Failed to get git diff", exc_info=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        _log.warning("Git diff unavailable for this experiment: %s", exc)
         return None
 
 

@@ -20,7 +20,7 @@ from cutamp.config import TAMPConfiguration
 from cutamp.tamp_world import TAMPWorld
 from cutamp.utils.obb import get_object_obb
 from cutamp.utils.common import filter_valid_spheres
-from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun, AXIS_LENGTH
+from cutamp.utils.rerun_utils import log_curobo_pose_to_rerun, curobo_to_rerun, log_curobo_mesh_to_rerun
 
 
 class Visualizer(ABC):
@@ -144,12 +144,16 @@ class RerunVisualizer(Visualizer):
         rr.set_time(timeline, duration=val)
 
     def set_joint_positions(self, q: Float[Union[torch.Tensor, np.ndarray, list], "d"]):
+        if self.robot is None:
+            return
         if isinstance(q, torch.Tensor):
             q = q.tolist()
         self.robot.set_joint_positions(q)
 
     def log_joint_trajectory(self, traj: Float[torch.Tensor, "n d"], timeline: str, start_time: float, dt: float):
         end_time = start_time + len(traj) * dt
+        if self.robot is None:
+            return end_time
         times = [rr.TimeColumn(timeline, duration=np.linspace(start_time, end_time, len(traj)))]
         key_to_columns = self.robot.get_rr_columns(traj)
         for key, columns in key_to_columns.items():
@@ -169,7 +173,7 @@ class RerunVisualizer(Visualizer):
             raise ValueError("Trajectory and mat4x4 must have the same length.")
         end_time = start_time + len(traj) * dt
         times = [rr.TimeColumn(timeline, duration=np.linspace(start_time, end_time, len(traj)))]
-        key_to_columns = self.robot.get_rr_columns(traj)
+        key_to_columns = {} if self.robot is None else self.robot.get_rr_columns(traj)
 
         if mat4x4_key in key_to_columns:
             raise ValueError(f"Key {mat4x4_key} already exists in key_to_components.")
@@ -186,7 +190,7 @@ class RerunVisualizer(Visualizer):
     def log_mat4x4(self, name: str, mat4x4: Float[Union[torch.Tensor, np.ndarray], "4 4"]):
         if isinstance(mat4x4, torch.Tensor):
             mat4x4 = mat4x4.detach().cpu()
-        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3], axis_length=AXIS_LENGTH))
+        rr.log(name, rr.Transform3D(translation=mat4x4[:3, 3], mat3x3=mat4x4[:3, :3]))
 
     def log_spheres(self, name: str, spheres: Float[torch.Tensor, "n 4"]):
         if isinstance(spheres, torch.Tensor):

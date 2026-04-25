@@ -14,11 +14,16 @@ from typing import Optional
 
 import torch
 
+from curobo._src.util.config_io import join_path, load_yaml
+from curobo.content import get_robot_configs_path
+from curobo.kinematics import Kinematics, KinematicsCfg
+from curobo.types import DeviceCfg
 from cutamp.algorithm import run_cutamp
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment, get_env_dir, load_env
+from cutamp.robots import RobotContainer
 from .envs import load_book_shelf_env, load_stick_button_env, load_tetris_env
 from .utils import (
     default_constraint_to_mult,
@@ -28,6 +33,16 @@ from .utils import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+_ROBOT_TO_CUROBO_CONFIG = {
+    "franka_panda": "franka.yml",
+    "franka_robotiq_2f_85": "franka_robotiq_2f_85.yml",
+    "franka_robotiq_2f_140": "franka_robotiq_2f_140.yml",
+    "ur5_robotiq_2f_85": "ur5_robotiq_2f_85.yml",
+    "ur5_robotiq_2f_140": "ur5_robotiq_2f_140.yml",
+    "xarm7": "xarm7.yml",
+}
 
 
 def load_demo_env(name: str) -> TAMPEnvironment:
@@ -58,6 +73,42 @@ def load_demo_env(name: str) -> TAMPEnvironment:
     return env
 
 
+def load_demo_robot(robot_name: str) -> tuple[RobotContainer, torch.Tensor]:
+    """Load the cuRobo robot model expected by the core cuTAMP API."""
+    robot_config = _ROBOT_TO_CUROBO_CONFIG.get(robot_name, f"{robot_name}.yml")
+    device_cfg = DeviceCfg()
+    robot_cfg = load_yaml(join_path(get_robot_configs_path(), robot_config))
+    kinematics_cfg = KinematicsCfg.from_robot_yaml_file(robot_cfg, device_cfg=device_cfg)
+    kinematics = Kinematics(kinematics_cfg)
+    joint_limits = kinematics.get_joint_limits().position
+    q_init = kinematics.default_joint_position.reshape(-1)
+
+    tool_from_ee = torch.eye(4, device=device_cfg.device, dtype=device_cfg.dtype)
+    if robot_name.startswith("franka"):
+        # Match the upstream Panda hand frame used by the built-in cuTAMP samplers.
+        tool_from_ee[:3, :3] = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            device=device_cfg.device,
+            dtype=device_cfg.dtype,
+        )
+        tool_from_ee[:3, 3] = torch.tensor([0.0, 0.0, 0.105], device=device_cfg.device, dtype=device_cfg.dtype)
+    robot = RobotContainer(
+        name=robot_name,
+        kinematics=kinematics,
+        joint_names=tuple(kinematics.joint_names),
+        tool_frame=kinematics.tool_frames[0],
+        joint_limits=joint_limits,
+        gripper_spheres=kinematics.robot_spheres,
+        tool_from_ee=tool_from_ee,
+        robot_cfg=robot_cfg,
+    )
+    return robot, q_init
+
+
 def cutamp_demo(
     env: TAMPEnvironment,
     config: TAMPConfiguration,
@@ -71,10 +122,21 @@ def cutamp_demo(
     )
     cost_reducer = CostReducer(constraint_to_mult)
     constraint_checker = ConstraintChecker(default_constraint_to_tol.copy())
+    robot, q_init = load_demo_robot(config.robot)
 
-    plan, _, failure_reason = run_cutamp(env, config, cost_reducer, constraint_checker, experiment_id=experiment_id)
-    if plan is None:
+    curobo_plan, _, failure_reason = run_cutamp(
+        env,
+        config,
+        robot,
+        cost_reducer,
+        constraint_checker,
+        q_init=q_init,
+        experiment_id=experiment_id,
+    )
+    if failure_reason is not None:
         _log.warning(f"No plan found: {failure_reason}")
+    elif config.curobo_plan and curobo_plan is None:
+        _log.warning("Satisfying particles found, but no cuRobo motion plan was returned")
 
 
 def entrypoint():
@@ -155,6 +217,18 @@ def entrypoint():
     )
     parser.add_argument(
         "--num_opt_steps", type=int, default=1000, help="Number of optimization steps to run for each skeleton."
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Optimizer learning rate for action parameters. Defaults to TAMPConfiguration.lr.",
+    )
+    parser.add_argument(
+        "--conf_lr",
+        type=float,
+        default=None,
+        help="Optimizer learning rate for robot configurations. Defaults to TAMPConfiguration.conf_lr.",
     )
     parser.add_argument(
         "--max_duration",
@@ -280,6 +354,10 @@ def entrypoint():
         placement_shrink_dist=args.placement_shrink_dist,
         prop_satisfying_break=args.prop_satisfying_break if args.prop_satisfying_break > 0 else None,
     )
+    if args.lr is not None:
+        config_kwargs["lr"] = args.lr
+    if args.conf_lr is not None:
+        config_kwargs["conf_lr"] = args.conf_lr
     if args.motion_refinement_mode is not None:
         config_kwargs["motion_refinement_mode"] = args.motion_refinement_mode
     config = TAMPConfiguration(**config_kwargs)

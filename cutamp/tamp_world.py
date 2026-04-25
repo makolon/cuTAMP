@@ -10,9 +10,8 @@
 import copy
 import itertools
 import logging
-from contextlib import contextmanager
 from functools import cached_property
-from typing import Dict, Iterator, List, Literal, Union
+from typing import Dict, List, Literal, Union
 
 import torch
 from jaxtyping import Float
@@ -374,35 +373,6 @@ class TAMPWorld:
             for tool_frame in self.motion_planner.tool_frames
         }
         self.motion_planner.update_tool_pose_criteria(criteria)
-
-    @contextmanager
-    def disabled_scene_obstacle(self, obstacle_name: str | None) -> Iterator[None]:
-        if not obstacle_name or self._runtime_scene.get_obstacle(obstacle_name) is None:
-            yield
-            return
-        previous_scene = self._runtime_scene.clone()
-        disabled_scene = previous_scene.clone()
-        disabled_scene.remove_obstacle(obstacle_name)
-        self.update_world(disabled_scene)
-        try:
-            yield
-        finally:
-            self.update_world(previous_scene)
-
-    @contextmanager
-    def detached_attached_object(self) -> Iterator[None]:
-        if self._attached_object_name is None or self._attached_joint_state is None:
-            yield
-            return
-        object_name = self._attached_object_name
-        joint_state = self._attached_joint_state.clone()
-        self.motion_planner.attachment_manager.detach()
-        self._attached_object_name = None
-        self._attached_joint_state = None
-        try:
-            yield
-        finally:
-            self.attach_scene_object(joint_state, object_name)
 
     def plan_pose(
         self,

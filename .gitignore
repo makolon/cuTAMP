@@ -233,3 +233,6 @@ run/
 # Point cloud data
 *.pcd
 *.ply
+
+# cuTAMP experiment logs
+cutamp-experiments/

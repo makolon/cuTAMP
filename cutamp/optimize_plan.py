@@ -15,6 +15,7 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 
+from curobo._src.types.pose import Pose as CuroboPose
 from cutamp.utils.common import Particles
 from cutamp.config import TAMPConfiguration
 from cutamp.constraint_checker import ConstraintChecker
@@ -27,18 +28,6 @@ from cutamp.utils.timer import TorchTimer
 from cutamp.utils.visualizer import Visualizer
 
 _log = logging.getLogger(__name__)
-
-
-def robot_sphere_diagnostic(*, robot_name: str, timestep: int, robot_sphere_count: int) -> dict[str, object] | None:
-    if "franka" not in str(robot_name).lower() or int(robot_sphere_count) >= 10:
-        return None
-    return {
-        "type": "robot_sphere_count_low",
-        "robot_name": str(robot_name),
-        "timestep": int(timestep),
-        "count": int(robot_sphere_count),
-        "expected_min": 10,
-    }
 
 
 class PlanContainer(TypedDict):
@@ -136,7 +125,6 @@ class ParticleOptimizer:
         # Setup some more metrics
         opt_metrics["num_satisfying"] = []
         opt_metrics["loss"] = []
-        opt_metrics["diagnostics"] = []
         if self.config.soft_cost is not None:
             opt_metrics["best_soft_costs"] = []
         opt_metrics["elapsed"] = []
@@ -279,34 +267,22 @@ class ParticleOptimizer:
             q = rollout["confs"][best_idx, ts]
 
             gripper_close = rollout["gripper_close"][ts]
-            gripper_joints = (
-                list(world.robot_container.visualizer_gripper_closed)
-                if gripper_close
-                else list(world.robot_container.visualizer_gripper_open)
-            )
+            if self.config.robot == "ur5":
+                gripper_joints = [0.4] if gripper_close else [0.0]
+            elif self.config.robot == "panda":
+                gripper_joints = [0.01, 0.01] if gripper_close else [0.04, 0.04]
+            else:
+                gripper_joints = []
             visualizer.set_joint_positions(q.tolist() + gripper_joints)
 
-            ee_pose = world.compute_ee_matrix(rollout["confs"][best_idx, ts][None]).cpu()
-            visualizer.log_mat4x4("rollout/ee_pose", ee_pose)
-
-            robot_spheres = rollout["collision_robot_spheres"][best_idx, ts].cpu()
-            visualizer.log_spheres("rollout/robot_spheres", robot_spheres)
-            robot_sphere_count = int(robot_spheres.shape[0])
-            visualizer.log_scalar("rollout/robot_sphere_count", float(robot_sphere_count))
-            diagnostic = robot_sphere_diagnostic(
-                robot_name=str(world.robot_name),
-                timestep=ts,
-                robot_sphere_count=robot_sphere_count,
+            ee_pose = CuroboPose(
+                position=rollout["ee_position"][best_idx, ts][None],
+                quaternion=rollout["ee_quaternion"][best_idx, ts][None],
             )
-            if diagnostic is not None:
-                opt_metrics["diagnostics"].append(diagnostic)
-                _log.warning(
-                    "Unexpectedly low robot sphere count for %s at rollout timestep %d: %d < %d",
-                    world.robot_name,
-                    ts,
-                    robot_sphere_count,
-                    10,
-                )
+            visualizer.log_mat4x4("rollout/ee_pose", ee_pose.get_matrix()[0].cpu())
+
+            robot_spheres = rollout["robot_spheres"][best_idx, ts].cpu()
+            visualizer.log_spheres("rollout/robot_spheres", robot_spheres)
 
             pose_ts = rollout["ts_to_pose_ts"][ts]
             for obj in world.movables:
