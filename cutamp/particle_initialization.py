@@ -69,18 +69,6 @@ class ParticleInitializer:
         self.place_cache = {}
         self.push_cache = {}
 
-    @staticmethod
-    def _extract_ik_positions(ik_result, header: str) -> tuple[torch.Tensor, torch.Tensor]:
-        success = ik_result.success.reshape(ik_result.success.shape[0], -1).any(dim=1)
-        solution = ik_result.solution
-        if solution.ndim == 3:
-            q_next = solution[:, 0].clone()
-        elif solution.ndim == 2:
-            q_next = solution.clone()
-        else:
-            raise RuntimeError(f"{header}. Unexpected IK solution shape: {tuple(solution.shape)}")
-        return success, q_next
-
     def __call__(self, plan_skeleton: PlanSkeleton, verbose: bool = True) -> Optional[Particles]:
         config = self.config
         num_particles = self.config.num_particles
@@ -88,7 +76,6 @@ class ParticleInitializer:
         particles = {"q0": self.q_init.clone()}
         deferred_params = set()
         log_debug = _log.debug if verbose else lambda *args, **kwargs: None
-        current_conf_name = "q0"
 
         # Iterate through each ground operator in the plan skeleton and initialize and build up particles
         for idx, ground_op in enumerate(plan_skeleton):
@@ -101,7 +88,6 @@ class ParticleInitializer:
                 q_start, _traj, q_end = params
                 if q_start not in particles:
                     raise ValueError(f"{q_start=} should already be bound")
-                current_conf_name = q_start
                 deferred_params.add(q_end)
                 log_debug(f"{header}. Deferred {q_end}")
 
@@ -114,7 +100,6 @@ class ParticleInitializer:
                     raise ValueError(f"{grasp=} should already be bound")
                 if q_start not in particles:
                     raise ValueError(f"{q_start=} should already be bound")
-                current_conf_name = q_start
                 deferred_params.add(q_end)
                 log_debug(f"{header}. Deferred {q_end}")
 
@@ -132,13 +117,12 @@ class ParticleInitializer:
                 if obj in self.pick_cache:
                     # important, we need to clone here
                     particles[grasp] = self.pick_cache[obj]["sampled_grasps"].clone()
-                    cached_confidences = self.pick_cache[obj].get("confidences")
-                    if isinstance(cached_confidences, torch.Tensor):
-                        particles[f"{grasp}_confidences"] = cached_confidences.clone()
                     particles[q] = self.pick_cache[obj]["q_solutions"].clone()
                     deferred_params.remove(q)
-                    current_conf_name = q
-                    log_debug(f"{header}. Using cached grasp poses for {obj}. {num_particles}/{num_particles} success")
+                    log_debug(
+                        f"{header}. Using cached grasp poses for {obj}. {num_particles}/{num_particles} success"
+                    )
+                    particles[f"{grasp}_confidences"] = self.pick_cache[obj]["confidences"]
                     continue
 
                 stream_data = self.grasp_streams.get(obj)
@@ -172,8 +156,11 @@ class ParticleInitializer:
                         sampled_grasps = grasp_6dof_sampler(num_samples, obj_curobo, obj_spheres, num_faces=num_faces)
                         sampled_transforms = action_6dof_to_mat4x4(sampled_grasps)
 
+                    # Filter grasps by collision with object
                     grasp_spheres = transform_spheres(world.robot_container.gripper_spheres, sampled_transforms)
                     grasp_coll = sphere_to_sphere_overlap(obj_spheres, grasp_spheres, activation_distance=0.0)
+
+                    # Select grasps: use collision-free only, or fall back to lowest collision
                     collision_free_mask = grasp_coll <= 1e-2
                     if collision_free_mask.any():
                         selected_grasps = sampled_grasps[collision_free_mask][:num_particles]
@@ -190,7 +177,7 @@ class ParticleInitializer:
                         )
                         selected_grasps = selected_grasps[sample_idxs]
 
-                    particles[grasp] = selected_grasps.clone()
+                    particles[grasp] = selected_grasps
                     grasp_transforms = (
                         action_4dof_to_mat4x4(particles[grasp])
                         if config.grasp_dof == 4
@@ -202,16 +189,11 @@ class ParticleInitializer:
                 world_from_ee = world_from_obj @ grasp_transforms
 
                 # Solve IK with cuRobo
-                current_position = particles[current_conf_name]
-                seed_config = current_position[:, None, :]
-                current_state = world.joint_state_from_position(current_position)
                 ik_result = world.solve_pose(
                     world_from_ee,
-                    current_state=current_state,
-                    seed_config=seed_config,
                     return_seeds=1,
                 )
-                success, q_next = self._extract_ik_positions(ik_result, header)
+                success, q_next = ik_result.success, ik_result.solution
                 num_success = int(success.sum().item())
                 log_debug(
                     f"{header}. {source} grasp IK success: "
@@ -225,11 +207,8 @@ class ParticleInitializer:
                         f"{header}. Carrying forward previous configuration for "
                         f"{num_particles - num_success}/{num_particles} failed grasp IK particles"
                     )
-                current_position = particles[current_conf_name]
-                q_next[~success] = current_position[~success].clone()
-                particles[q] = q_next
+                particles[q] = ik_result.solution[:, 0]
                 deferred_params.remove(q)
-                current_conf_name = q
 
                 if config.cache_subgraphs:
                     self.pick_cache[obj] = {
@@ -262,7 +241,6 @@ class ParticleInitializer:
                         particles[placement] = sampled_placements
                         particles[q] = self.place_cache[(obj, surface)]["q_solutions"].clone()
                         deferred_params.remove(q)
-                        current_conf_name = q
                         log_debug(
                             f"{header}. Using cached placement poses for {obj}. {num_particles}/{num_particles} success"
                         )
@@ -329,34 +307,18 @@ class ParticleInitializer:
                     else:
                         obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
                     world_from_ee = world_from_obj @ obj_from_grasp
-                    current_position = particles[current_conf_name]
-                    seed_config = current_position[:, None, :]
-                    current_state = world.joint_state_from_position(current_position)
                     ik_result = world.solve_pose(
                         world_from_ee,
-                        current_state=current_state,
-                        seed_config=seed_config,
                         return_seeds=1,
                     )
-                    success, q_next = self._extract_ik_positions(ik_result, header)
+                    success, q_next = ik_result.success, ik_result.solution
                     num_success = int(success.sum().item())
                     log_debug(
                         f"{header}. {source} place IK success: "
                         f"{num_success}/{num_particles}, took {ik_result.solve_time:.2f}s"
                     )
-                    if num_success == 0:
-                        log_debug(f"{header}. Place IK failed for all {num_particles} particles; failing subgraph")
-                        return None
-                    if num_success < num_particles:
-                        log_debug(
-                            f"{header}. Carrying forward previous configuration for "
-                            f"{num_particles - num_success}/{num_particles} failed place IK particles"
-                        )
-                    current_position = particles[current_conf_name]
-                    q_next[~success] = current_position[~success].clone()
-                    particles[q] = q_next
+                    particles[q] = ik_result.solution[:, 0]
                 deferred_params.remove(q)
-                current_conf_name = q
 
                 if config.cache_subgraphs and not config.random_init:
                     self.place_cache[(obj, surface)] = {
@@ -382,7 +344,6 @@ class ParticleInitializer:
                     particles[push_pose] = sampled_push
                     particles[q] = self.push_cache[button]["q_solutions"].clone()
                     deferred_params.remove(q)
-                    current_conf_name = q
                     log_debug(f"{header}. Using cached push poses for {button}. {num_particles}/{num_particles} success")
                     continue
 
@@ -419,33 +380,17 @@ class ParticleInitializer:
                 )
 
                 # Solve IK with cuRobo
-                current_position = particles[current_conf_name]
-                seed_config = current_position[:, None, :]
-                current_state = world.joint_state_from_position(current_position)
                 ik_result = world.solve_pose(
                     world_from_ee,
-                    current_state=current_state,
-                    seed_config=seed_config,
                     return_seeds=1,
                 )
-                success, q_next = self._extract_ik_positions(ik_result, header)
+                success, q_next = ik_result.success, ik_result.solution
                 num_success = int(success.sum().item())
                 log_debug(
                     f"{header}. IK success: {num_success}/{num_particles}, took {ik_result.solve_time:.2f}s"
                 )
-                if num_success == 0:
-                    log_debug(f"{header}. Push IK failed for all {num_particles} particles; failing subgraph")
-                    return None
-                if num_success < num_particles:
-                    log_debug(
-                        f"{header}. Carrying forward previous configuration for "
-                        f"{num_particles - num_success}/{num_particles} failed push IK particles"
-                    )
-                current_position = particles[current_conf_name]
-                q_next[~success] = current_position[~success].clone()
-                particles[q] = q_next
+                particles[q] = ik_result.solution[:, 0]
                 deferred_params.remove(q)
-                current_conf_name = q
 
                 # Cache the push poses
                 if config.cache_subgraphs:

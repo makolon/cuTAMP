@@ -35,20 +35,6 @@ _log = logging.getLogger(__name__)
 Particles = Dict[str, Float[torch.Tensor, "num_particles *h d"]]
 
 
-def filter_valid_spheres(spheres: Float[torch.Tensor, "*batch n 4"]) -> Float[torch.Tensor, "*batch m 4"]:
-    """Drop cuRobo placeholder spheres (radius <= 0) while preserving batch dimensions."""
-    if spheres.ndim < 2 or spheres.shape[-1] != 4:
-        raise ValueError(f"Expected sphere tensor with shape (..., n, 4), got {tuple(spheres.shape)}")
-
-    valid = spheres[..., 3] > 0.0
-    if valid.ndim == 1:
-        sphere_mask = valid
-    else:
-        reduce_dims = tuple(range(valid.ndim - 1))
-        sphere_mask = valid.any(dim=reduce_dims)
-    return spheres[..., sphere_mask, :].contiguous()
-
-
 def pose_list_to_mat4x4(pose: list[float] | None) -> Float[torch.Tensor, "4 4"]:
     """cuRobo pose list to 4x4 transformation matrix."""
     mat4x4 = torch.eye(4)

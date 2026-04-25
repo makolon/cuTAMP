@@ -69,7 +69,7 @@ torch = { index = "torch" }
 torchvision = { index = "torch" }
 
 # Local sources
-nvidia-curobo = { git = "https://github.com/makolon/curobo.git" }
+nvidia-curobo = { git = "https://github.com/NVlabs/curobo.git" }
 
 [[tool.uv.index]]
 explicit = true

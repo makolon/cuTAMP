@@ -30,7 +30,6 @@ from cutamp.task_planning import State
 from cutamp.utils.collision import get_world_collision_cost
 from cutamp.utils.common import (
     approximate_goal_aabb,
-    filter_valid_spheres,
     get_world_cfg,
     sample_between_bounds,
     transform_spheres,
@@ -49,7 +48,7 @@ class TAMPWorld:
         device_cfg: DeviceCfg,
         robot: RobotContainer,
         q_init: Float[torch.Tensor, "dof"],
-        ik_max_batch_size: int = 1,
+        ik_batch_size: int = 64,
         collision_activation_distance: float = 0.0,
         coll_n_spheres: int = 50,
         coll_sphere_radius: float = 0.005,
@@ -64,8 +63,7 @@ class TAMPWorld:
         self.robot_container = robot
         self.robot_name = self.robot_container.name
         self.q_init = self.device_cfg.to_device(q_init)
-        self.ik_max_batch_size = max(1, int(ik_max_batch_size))
-        self.ik_solver_batch_size = self.ik_max_batch_size
+        self.ik_solver_batch_size = ik_batch_size
         self.motion_refinement_mode = motion_refinement_mode
         self.collision_activation_distance = collision_activation_distance
 
@@ -211,52 +209,6 @@ class TAMPWorld:
         matrix = self.compute_tool_pose(joint_state).get_matrix() @ self.ee_from_tool
         return matrix[0] if matrix.shape[0] == 1 else matrix
 
-    def compute_robot_spheres(self, joint_state: JointState | torch.Tensor) -> torch.Tensor:
-        return filter_valid_spheres(self.compute_kinematics(joint_state).robot_spheres)
-
-    def compute_robot_scene_and_self_collision(self, confs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        confs = self.device_cfg.to_device(confs)
-        squeeze_horizon = False
-        if confs.ndim == 2:
-            confs = confs[:, None, :]
-            squeeze_horizon = True
-        elif confs.ndim != 3:
-            raise ValueError(f"Expected joint tensor with shape [batch, dof] or [batch, horizon, dof], got {tuple(confs.shape)}")
-
-        batch, horizon, dof = confs.shape
-        self.robot_collision_checker.setup_batch_tensors(batch, horizon)
-
-        state = self.robot_collision_checker.get_kinematics(confs)
-        robot_spheres = state.get_link_spheres()
-        num_spheres = robot_spheres.shape[2]
-
-        collision_cost = self.robot_collision_checker.collision_cost
-        if collision_cost is not None and collision_cost.config.num_spheres != num_spheres:
-            collision_cost.update_num_spheres(num_spheres, batch_size=batch, horizon=horizon)
-
-        collision_constraint = self.robot_collision_checker.collision_constraint
-        if collision_constraint is not None and collision_constraint.config.num_spheres != num_spheres:
-            collision_constraint.update_num_spheres(num_spheres, batch_size=batch, horizon=horizon)
-
-        robot_to_world = self.robot_collision_checker.get_collision_distance(state)
-        if robot_to_world.ndim == 3:
-            if collision_cost is not None:
-                robot_to_world = collision_cost.jit_weight_distance(
-                    robot_to_world, collision_cost.config.sum_distance
-                )
-            else:
-                robot_to_world = robot_to_world.sum(dim=-1)
-
-        robot_to_self = torch.zeros(
-            (batch, horizon),
-            device=robot_spheres.device,
-            dtype=robot_spheres.dtype,
-        )
-
-        if squeeze_horizon:
-            return robot_to_world[:, 0], robot_to_self[:, 0]
-        return robot_to_world, robot_to_self
-
     def warmup_ik_solver(self, num_particles: int):
         q = sample_between_bounds(num_particles, bounds=self.robot_container.joint_limits)
         world_from_ee = self.compute_ee_matrix(self.joint_state_from_position(q))
@@ -317,12 +269,6 @@ class TAMPWorld:
         )
         return MotionPlanner(motion_cfg)
 
-    def plan_result_success(self, result: object | None) -> bool:
-        success = getattr(result, "success", None)
-        if isinstance(success, bool):
-            return success
-        return isinstance(success, torch.Tensor) and bool(success.any().item())
-
     def _goal_tool_pose(self, desired_world_from_ee: torch.Tensor) -> GoalToolPose:
         desired_world_from_tool = desired_world_from_ee @ self.tool_from_ee
         desired_pose = Pose.from_matrix(
@@ -343,20 +289,6 @@ class TAMPWorld:
         return_seeds: int = 1,
     ):
         desired_world_from_ee = self.device_cfg.to_device(desired_world_from_ee)
-        if desired_world_from_ee.ndim == 2:
-            desired_world_from_ee = desired_world_from_ee.unsqueeze(0)
-        current_state = None if current_state is None else self.ensure_joint_state(current_state)
-        if seed_config is not None:
-            seed_config = self.device_cfg.to_device(seed_config)
-            if seed_config.ndim == 1:
-                seed_config = seed_config.view(1, 1, -1)
-            elif seed_config.ndim == 2:
-                seed_config = seed_config[:, None, :]
-            elif seed_config.ndim != 3:
-                raise ValueError(
-                    f"Expected seed_config with shape [dof], [batch, dof], or [batch, num_seeds, dof], got {tuple(seed_config.shape)}"
-                )
-
         return self.ik_solver.solve_pose(
             self._goal_tool_pose(desired_world_from_ee),
             current_state=current_state,
@@ -381,27 +313,25 @@ class TAMPWorld:
         *,
         linear_axis: str | None = None,
         allow_detached_retry: bool = False,
-        obstacle_name: str | None = None,
         max_attempts: int = 5,
         enable_graph_attempt: int = 1,
     ):
         start_js = self.ensure_joint_state(start_js)
 
         def run_once():
-            with self.disabled_scene_obstacle(obstacle_name):
-                self._set_linear_motion_criteria(linear_axis)
-                try:
-                    return self.motion_planner.plan_pose(
-                        self._goal_tool_pose(desired_world_from_ee),
-                        start_js,
-                        max_attempts=max_attempts,
-                        enable_graph_attempt=enable_graph_attempt,
-                    )
-                finally:
-                    self._set_linear_motion_criteria(None)
+            self._set_linear_motion_criteria(linear_axis)
+            try:
+                return self.motion_planner.plan_pose(
+                    self._goal_tool_pose(desired_world_from_ee),
+                    start_js,
+                    max_attempts=max_attempts,
+                    enable_graph_attempt=enable_graph_attempt,
+                )
+            finally:
+                self._set_linear_motion_criteria(None)
 
         result = run_once()
-        if not self.plan_result_success(result) and allow_detached_retry:
+        if not result.success and allow_detached_retry:
             with self.detached_attached_object():
                 result = run_once()
         return result
@@ -412,7 +342,6 @@ class TAMPWorld:
         goal_js: JointState,
         *,
         allow_detached_retry: bool = False,
-        obstacle_name: str | None = None,
         max_attempts: int = 5,
         enable_graph_attempt: int = 1,
     ):
@@ -420,16 +349,15 @@ class TAMPWorld:
         goal_js = self.ensure_joint_state(goal_js)
 
         def run_once():
-            with self.disabled_scene_obstacle(obstacle_name):
-                return self.motion_planner.plan_cspace(
-                    goal_js,
-                    start_js,
-                    max_attempts=max_attempts,
-                    enable_graph_attempt=enable_graph_attempt,
-                )
+            return self.motion_planner.plan_cspace(
+                goal_js,
+                start_js,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt,
+            )
 
         result = run_once()
-        if not self.plan_result_success(result) and allow_detached_retry:
+        if not result.success and allow_detached_retry:
             with self.detached_attached_object():
                 result = run_once()
         return result

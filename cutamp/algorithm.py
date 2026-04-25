@@ -302,7 +302,7 @@ def setup_cutamp(
             device_cfg,
             robot=robot_container,
             q_init=q_init,
-            ik_max_batch_size=config.num_particles,
+            ik_batch_size=config.num_particles,
             collision_activation_distance=config.world_activation_distance,
             coll_n_spheres=config.coll_n_spheres,
             coll_sphere_radius=config.coll_sphere_radius,

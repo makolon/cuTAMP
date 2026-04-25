@@ -14,6 +14,7 @@ from typing import Dict, Union
 
 import roma
 import torch
+from einops import rearrange
 from jaxtyping import Float
 
 from curobo._src.cost.cost_self_collision import SelfCollisionCost
@@ -92,10 +93,9 @@ class CostFunction:
         )
 
         self_collision_cfg = SelfCollisionCostCfg(
-            weight=self.world.device_cfg.to_device([1.0]),
+            self_collision_kin_config=self.world.kinematics.get_self_collision_config(),
+            weight=1.0,
             device_cfg=self.world.device_cfg,
-            use_grad_input=False,
-            self_collision_kin_config=self.world.robot_collision_checker.kinematics.get_self_collision_config(),
         )
         self.self_collision_cost_fn = SelfCollisionCost(self_collision_cfg)
 
@@ -205,7 +205,7 @@ class CostFunction:
         self.obj_to_first_pose_ts = {}
         self.pair_to_first_pose_ts = {}
         self._activated_objs = sorted(self.activated_obj)
-        self._movable_world_masks = {}
+        self._movable_world_mask = None
         self._all_pose_ts = None
 
     def _validate_rollout(self, rollout: Rollout):
@@ -249,24 +249,32 @@ class CostFunction:
         self._rollout_validated = True
 
     def kinematic_costs(self, rollout: Rollout) -> Union[dict, None]:
-        """Kinematic constraints - i.e., pose error between actual and desired end-effector poses."""
-        ee_pose = Pose(
-            position=rollout["ee_position"].view(-1, 3),
-            quaternion=rollout["ee_quaternion"].view(-1, 4),
-            normalize_rotation=False,
-        )
-        desired_pose = Pose.from_matrix(rollout["world_from_ee_desired"].view(-1, 4, 4))
-        batch_shape = rollout["ee_position"].shape[:-1]
-        p_dist_flat, quat_dist_flat = ee_pose.distance(desired_pose)
-        pos_errs = p_dist_flat.view(batch_shape)
-        rot_errs = quat_dist_flat.view(batch_shape)
+        ee_position = rollout["ee_position"]          # [B, K, 3]
+        ee_quaternion = rollout["ee_quaternion"]      # [B, K, 4]
+        desired_T = rollout["world_from_ee_desired"]  # [B, K, 4, 4]
 
-        kinematic_cost = {
+        B, K = ee_position.shape[:2]
+
+        desired_pose = Pose.from_matrix(desired_T.reshape(B * K, 4, 4))
+        desired_position = desired_pose.position.reshape(B, K, 3)
+        desired_quaternion = desired_pose.quaternion.reshape(B, K, 4)
+
+        pos_errs = torch.sum((ee_position - desired_position).square(), dim=-1)
+
+        ee_quaternion = torch.nn.functional.normalize(ee_quaternion, dim=-1, eps=1e-8)
+        desired_quaternion = torch.nn.functional.normalize(desired_quaternion, dim=-1, eps=1e-8)
+
+        dot = torch.sum(ee_quaternion * desired_quaternion, dim=-1)
+        rot_errs = 1.0 - dot.square()
+
+        return {
             "type": "constraint",
             "constraints": self.kinematic_constraints,
-            "values": {"pos_err": pos_errs, "rot_err": rot_errs},
+            "values": {
+                "pos_err": pos_errs,
+                "rot_err": rot_errs,
+            },
         }
-        return kinematic_cost
 
     def motion_costs(self, rollout: Rollout) -> Union[dict, None]:
         """Motion constraints - valid motions don't exceed joint limits or self-collide."""
@@ -277,12 +285,14 @@ class CostFunction:
         )
 
         # Self collisions
+        robot_spheres = rollout["robot_spheres"]
+        B, H = robot_spheres.shape[:2]
         with torch.profiler.record_function("coll::self_collision"):
-            robot_spheres = rollout["robot_spheres"]
-            self.self_collision_cost_fn.setup_batch_tensors(*robot_spheres.shape[:2])
+            self.self_collision_cost_fn.setup_batch_tensors(
+                batch_size=B,
+                horizon=H,
+            )
             self_coll_vals = self.self_collision_cost_fn.forward(robot_spheres)
-            if self_coll_vals.ndim == 3 and self_coll_vals.shape[-1] == 1:
-                self_coll_vals = self_coll_vals[..., 0]
 
         motion_cost = {
             "type": "constraint",
@@ -439,12 +449,6 @@ class CostFunction:
             dtype=rollout["confs"].dtype,
             device=rollout["confs"].device,
         )
-        for cost in self.grasp_costs:
-            _obj, grasp = cost.params
-            confidences = rollout["grasp_confidences"].get(grasp)
-            if confidences is None:
-                continue
-            total_cost = total_cost + (1.0 - confidences.clamp(0.0, 1.0))
 
         return {
             "type": "cost",
@@ -455,75 +459,55 @@ class CostFunction:
     def collision_costs(self, rollout: Rollout, obj_to_spheres: Dict[str, Float[torch.Tensor, "b t n 4"]]) -> dict:
         """Collision costs."""
         # Robot to world
+        robot_spheres = rollout["robot_spheres"]
         with torch.profiler.record_function("coll::robot_to_world"):
-            robot_to_world, _ = self.world.compute_robot_scene_and_self_collision(rollout["confs"])
-            coll_values = {"robot_to_world": robot_to_world}
-        collision_robot_spheres = rollout["collision_robot_spheres"]
+            coll_values = {"robot_to_world": self.world.collision_fn(robot_spheres)}
 
         # Collision between movables and world — batch all activated objects in one collision_fn call,
         # then mask out timesteps before each object's first placement. The motion solver handles this
         # analogously by temporarily detaching the object from the robot when the grasped object's
         # spheres cause an invalid start state during retract planning.
         with torch.profiler.record_function("coll::movable_to_world"):
-            if self._activated_objs:
-                movable_to_world = None
-                for obj in self._activated_objs:
-                    coll = self.world.collision_fn(obj_to_spheres[obj])
-                    if self.config.mask_initial_movable_world_collision:
-                        mask = self._movable_world_masks.get(obj)
-                        if mask is None:
-                            mask = torch.ones((1, coll.shape[1]), dtype=coll.dtype, device=coll.device)
-                            first_ts = self.obj_to_first_pose_ts[obj]
-                            if first_ts > 0:
-                                mask[:, :first_ts] = 0.0
-                            self._movable_world_masks[obj] = mask
-                        coll = coll * mask
-                    movable_to_world = coll if movable_to_world is None else movable_to_world + coll
-                assert movable_to_world is not None
-                coll_values["movable_to_world"] = movable_to_world
-            else:
-                if obj_to_spheres:
-                    reference_spheres = next(iter(obj_to_spheres.values()))
-                    coll_values["movable_to_world"] = torch.zeros(
-                        (reference_spheres.shape[0], reference_spheres.shape[1]),
-                        dtype=reference_spheres.dtype,
-                        device=reference_spheres.device,
-                    )
-                else:
-                    coll_values["movable_to_world"] = torch.zeros(
-                        (rollout["num_particles"], 1),
-                        dtype=collision_robot_spheres.dtype,
-                        device=collision_robot_spheres.device,
-                    )
+            stacked = torch.stack([obj_to_spheres[obj] for obj in self._activated_objs])
+            coll = self.world.collision_fn(rearrange(stacked, "objs b t n d -> (objs b) t n d"))
+            coll = rearrange(coll, "(objs b) t -> objs b t", objs=len(self._activated_objs))
+            if self.config.mask_initial_movable_world_collision:
+                if self._movable_world_mask is None:
+                    num_objs, t = coll.shape[0], coll.shape[2]
+                    mask = torch.ones(num_objs, 1, t, device=coll.device)
+                    for i, obj in enumerate(self._activated_objs):
+                        first_ts = self.obj_to_first_pose_ts[obj]
+                        if first_ts > 0:
+                            mask[i, :, :first_ts] = 0.0
+                    self._movable_world_mask = mask
+                coll = coll * self._movable_world_mask
+            coll_values["movable_to_world"] = coll.sum(dim=0)
 
         with torch.profiler.record_function("coll::robot_to_movables"):
             # Concatenate all movable spheres into one kernel launch — faster than per-object
             # launches at our sphere counts (~50/object) where launch overhead dominates.
-            if obj_to_spheres:
-                all_obj_spheres = torch.cat(
-                    [obj_s[:, self._all_pose_ts] for obj_s in obj_to_spheres.values()], dim=-2
-                )
-                coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
-                    collision_robot_spheres,
-                    all_obj_spheres,
-                    activation_distance=self.config.gripper_activation_distance,
-                )
-            else:
-                coll_values["robot_to_movables"] = torch.zeros_like(coll_values["robot_to_world"])
+            all_obj_spheres = torch.cat(
+                [obj_s[:, self._all_pose_ts] for obj_s in obj_to_spheres.values()], dim=-2
+            )
+            coll_values["robot_to_movables"] = sphere_to_sphere_overlap(
+                robot_spheres, all_obj_spheres, activation_distance=self.config.gripper_activation_distance
+            )
 
         # Collision between movable objects
         if self.movable_obj_pairs:
             with torch.profiler.record_function("coll::movable_to_movable"):
-                collision_results = []
-                for name1, name2 in self.movable_obj_pairs:
-                    collision_results.append(
-                        sphere_to_sphere_overlap(
-                            obj_to_spheres[name1],
-                            obj_to_spheres[name2],
-                            activation_distance=self.config.movable_activation_distance,
-                            use_aabb_check=True,
-                        )
-                    )
+                # Stack into (num_pairs, b, t, n_spheres, 4)
+                obj_1_spheres_list = [obj_to_spheres[name1] for name1, _ in self.movable_obj_pairs]
+                obj_2_spheres_list = [obj_to_spheres[name2] for _, name2 in self.movable_obj_pairs]
+                obj_1_spheres_batched = torch.stack(obj_1_spheres_list, dim=0)
+                obj_2_spheres_batched = torch.stack(obj_2_spheres_list, dim=0)
+
+                collision_results = sphere_to_sphere_overlap(
+                    obj_1_spheres_batched,
+                    obj_2_spheres_batched,
+                    activation_distance=self.config.movable_activation_distance,
+                    use_aabb_check=True,
+                )  # (num_pairs, b, t)
 
             for idx, pair in enumerate(self.movable_obj_pairs):
                 pair_cost = collision_results[idx]
@@ -597,11 +581,6 @@ class CostFunction:
         with torch.profiler.record_function("cost::trajectory"):
             traj_cost = self.trajectory_costs(rollout)
         add_cost(TrajectoryLength.type, traj_cost)
-
-        # Grasp quality cost
-        with torch.profiler.record_function("cost::grasp_quality"):
-            grasp_cost = self.grasp_quality_costs(rollout)
-        add_cost(GraspCost.type, grasp_cost)
 
         # Get collision spheres for movable objects
         with torch.profiler.record_function("cost::transform_spheres"):
