@@ -241,15 +241,18 @@ class CostFunction:
             self.obj_to_first_pose_ts[obj] = rollout["action_to_pose_ts"][action]
         for pair in self.movable_obj_pairs:
             obj_1, obj_2 = pair
-            if obj_1 in self.obj_to_first_pose_ts and obj_2 in self.obj_to_first_pose_ts:
-                self.pair_to_first_pose_ts[pair] = min(
-                    self.obj_to_first_pose_ts[obj_1], self.obj_to_first_pose_ts[obj_2]
-                )
-            elif obj_1 in self.obj_to_first_pose_ts:
-                self.pair_to_first_pose_ts[pair] = self.obj_to_first_pose_ts[obj_1]
+
+            obj_1_ts = self.obj_to_first_pose_ts.get(obj_1)
+            obj_2_ts = self.obj_to_first_pose_ts.get(obj_2)
+
+            if obj_1_ts is not None and obj_2_ts is not None:
+                self.pair_to_first_pose_ts[pair] = min(obj_1_ts, obj_2_ts)
+            elif obj_1_ts is not None:
+                self.pair_to_first_pose_ts[pair] = obj_1_ts
+            elif obj_2_ts is not None:
+                self.pair_to_first_pose_ts[pair] = obj_2_ts
             else:
-                assert obj_2 in self.obj_to_first_place
-                self.pair_to_first_pose_ts[pair] = self.obj_to_first_pose_ts[obj_2]
+                self.pair_to_first_pose_ts[pair] = len(rollout["ts_to_pose_ts"])
 
         self._all_pose_ts = list(rollout["ts_to_pose_ts"].values())
 
@@ -455,7 +458,7 @@ class CostFunction:
                         num_objs, t = coll.shape[0], coll.shape[2]
                         mask = torch.ones(num_objs, 1, t, device=coll.device)
                         for i, obj in enumerate(self._activated_objs):
-                            first_ts = self.obj_to_first_pose_ts[obj]
+                            first_ts = self.obj_to_first_pose_ts.get(obj, t)
                             if first_ts > 0:
                                 mask[i, :, :first_ts] = 0.0
                         self._movable_world_mask = mask
@@ -496,9 +499,13 @@ class CostFunction:
             for idx, pair in enumerate(self.movable_obj_pairs):
                 pair_cost = collision_results[idx]
                 pose_ts = self.pair_to_first_pose_ts[pair]
-                # Only consider costs from when the action was activated. This allows us to handle objects that
-                # are initially in-collision (perhaps due to bad perception)
+
+                if pose_ts >= pair_cost.shape[1]:
+                    continue
+
                 pair_cost_filtered = pair_cost[:, pose_ts:]
+                name1, name2 = pair
+                coll_values[f"{name1}_to_{name2}"] = pair_cost_filtered
                 name1, name2 = pair
                 coll_values[f"{name1}_to_{name2}"] = pair_cost_filtered
 
