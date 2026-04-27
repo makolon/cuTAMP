@@ -12,10 +12,18 @@ from collections.abc import Mapping
 from typing import Optional
 
 import torch
+from curobo.geom.types import Cuboid
 from curobo.types.math import Pose
 
 from cutamp.config import TAMPConfiguration
 
+from cutamp.costs import sphere_to_sphere_overlap
+from cutamp.samplers import (
+    grasp_4dof_sampler,
+    grasp_6dof_sampler,
+    place_4dof_sampler,
+    sample_yaw,
+)
 from cutamp.stream_initializers import (
     get_stream_data,
     grasp_data_to_actions,
@@ -32,6 +40,7 @@ from cutamp.utils.common import (
     action_6dof_to_mat4x4,
     pose_list_to_mat4x4,
     sample_between_bounds,
+    transform_spheres,
 )
 
 _log = logging.getLogger(__name__)
@@ -123,18 +132,58 @@ class ParticleInitializer:
                     continue
 
                 stream_data = self.grasp_streams.get(obj)
-                grasps_obj = stream_data.get("grasps_obj")
-                confidences_pt = stream_data.get("confidences_pt")
+                if stream_data is not None:
+                    grasps_obj = stream_data.get("grasps_obj")
+                    confidences_pt = stream_data.get("confidences_pt")
 
-                grasp_actions, grasp_transforms = grasp_data_to_actions(grasps_obj, config.grasp_dof)
-                indices = sample_initializer_indices(
-                    grasp_actions.shape[0],
-                    num_particles,
-                    device=grasp_actions.device,
-                    scores=confidences_pt if isinstance(confidences_pt, torch.Tensor) else None,
-                )
-                particles[grasp] = grasp_actions[indices].clone()
-                grasp_transforms = grasp_transforms[indices]
+                    grasp_actions, grasp_transforms = grasp_data_to_actions(grasps_obj, config.grasp_dof)
+                    indices = sample_initializer_indices(
+                        grasp_actions.shape[0],
+                        num_particles,
+                        device=grasp_actions.device,
+                        scores=confidences_pt if isinstance(confidences_pt, torch.Tensor) else None,
+                    )
+                    particles[grasp] = grasp_actions[indices].clone()
+                    grasp_transforms = grasp_transforms[indices]
+                else:
+                    obj_curobo = world.get_object(obj)
+                    obj_spheres = world.get_collision_spheres(obj)
+                    num_samples = num_particles * 2
+                    num_faces = 4 if isinstance(obj_curobo, Cuboid) else None
+                    if config.grasp_dof == 4:
+                        sampled_grasps = grasp_4dof_sampler(num_samples, obj_curobo, obj_spheres, num_faces=num_faces)
+                        sampled_transforms = action_4dof_to_mat4x4(sampled_grasps)
+                    else:
+                        sampled_grasps = grasp_6dof_sampler(num_samples, obj_curobo, obj_spheres, num_faces=num_faces)
+                        sampled_transforms = action_6dof_to_mat4x4(sampled_grasps)
+
+                    # Filter grasps by collision with object
+                    grasp_spheres = transform_spheres(world.robot_container.gripper_spheres, sampled_transforms)
+                    grasp_coll = sphere_to_sphere_overlap(obj_spheres, grasp_spheres, activation_distance=0.0)
+
+                    # Select grasps: use collision-free only, or fall back to lowest collision
+                    collision_free_mask = grasp_coll <= 1e-2
+                    if collision_free_mask.any():
+                        selected_grasps = sampled_grasps[collision_free_mask][:num_particles]
+                    else:
+                        best_idxs = grasp_coll.topk(num_particles, largest=False).indices
+                        selected_grasps = sampled_grasps[best_idxs]
+
+                    if selected_grasps.shape[0] < num_particles:
+                        sample_idxs = torch.randint(
+                            0,
+                            selected_grasps.shape[0],
+                            (num_particles,),
+                            device=selected_grasps.device,
+                        )
+                        selected_grasps = selected_grasps[sample_idxs]
+
+                    particles[grasp] = selected_grasps
+                    grasp_transforms = (
+                        action_4dof_to_mat4x4(particles[grasp])
+                        if config.grasp_dof == 4
+                        else action_6dof_to_mat4x4(particles[grasp])
+                    )
 
                 world_from_obj = pose_list_to_mat4x4(world.get_object(obj).pose).to(world.tensor_args.device)
                 world_from_grasp = world_from_obj @ grasp_transforms
@@ -189,18 +238,47 @@ class ParticleInitializer:
 
                 place_stream_data = self.place_streams.get(obj)
                 stream_data = place_stream_data.get(surface)
-                placements_world = stream_data.get("placements_world")
-                support_scores_pt = stream_data.get("support_scores_pt")
+                if stream_data is not None:
+                    placements_world = stream_data.get("placements_world")
+                    support_scores_pt = stream_data.get("support_scores_pt")
 
-                sampled_placements, world_from_obj = place_data_to_actions(placements_world)
-                indices = sample_initializer_indices(
-                    sampled_placements.shape[0],
-                    num_particles,
-                    device=sampled_placements.device,
-                    scores=support_scores_pt if isinstance(support_scores_pt, torch.Tensor) else None,
-                )
-                sampled_placements = sampled_placements[indices].clone()
-                world_from_obj = world_from_obj[indices]
+                    sampled_placements, world_from_obj = place_data_to_actions(placements_world)
+                    indices = sample_initializer_indices(
+                        sampled_placements.shape[0],
+                        num_particles,
+                        device=sampled_placements.device,
+                        scores=support_scores_pt if isinstance(support_scores_pt, torch.Tensor) else None,
+                    )
+                    sampled_placements = sampled_placements[indices].clone()
+                    world_from_obj = world_from_obj[indices]
+                else:
+                    obj_curobo = world.get_object(obj)
+                    obj_spheres = world.get_collision_spheres(obj)
+                    if config.random_init:
+                        yaw = sample_yaw(num_particles * 2, None, world.device)
+                        aabb = world.world_aabb.clone()
+                        aabb[0, 2] = 0.0
+                        aabb[1, 2] = max(aabb[1, 2], 0.2)
+                        xyz = sample_between_bounds(num_particles * 2, aabb)
+                        sampled_placements = torch.cat([xyz, yaw.to(xyz.dtype).unsqueeze(-1)], dim=1)
+                    else:
+                        sampled_placements = place_4dof_sampler(
+                            num_particles * 2,
+                            obj_curobo,
+                            obj_spheres,
+                            world.get_object(surface),
+                            surface_rep=config.placement_check,
+                            shrink_dist=config.placement_shrink_dist,
+                            collision_activation_dist=config.world_activation_distance,
+                        )
+
+                    world_from_obj = action_4dof_to_mat4x4(sampled_placements)
+                    obj_place_spheres = transform_spheres(obj_spheres, world_from_obj)
+                    place_coll = world.collision_fn(obj_place_spheres[:, None].contiguous())[:, 0]
+                    best_idxs = place_coll.topk(num_particles, largest=False).indices
+                    sampled_placements = sampled_placements[best_idxs].clone()
+                    world_from_obj = world_from_obj[best_idxs]
+
                 particles[placement] = sampled_placements
 
                 if config.random_init:
@@ -254,17 +332,28 @@ class ParticleInitializer:
                     continue
 
                 stream_data = self.push_streams.get(button)
-                pushes_world = stream_data.get("pushes_world")
-                push_scores_pt = stream_data.get("push_scores_pt")
+                if stream_data is not None:
+                    pushes_world = stream_data.get("pushes_world")
+                    push_scores_pt = stream_data.get("push_scores_pt")
 
-                sampled_push, world_from_button = push_data_to_actions(pushes_world, config.push_dof)
-                indices = sample_initializer_indices(
-                    sampled_push.shape[0],
-                    num_particles,
-                    device=sampled_push.device,
-                    scores=push_scores_pt if isinstance(push_scores_pt, torch.Tensor) else None,
-                )
-                sampled_push = sampled_push[indices].clone()
+                    sampled_push, world_from_button = push_data_to_actions(pushes_world, config.push_dof)
+                    indices = sample_initializer_indices(
+                        sampled_push.shape[0],
+                        num_particles,
+                        device=sampled_push.device,
+                        scores=push_scores_pt if isinstance(push_scores_pt, torch.Tensor) else None,
+                    )
+                    sampled_push = sampled_push[indices].clone()
+                else:
+                    aabb = world.get_aabb(button).clone()
+                    lower_xy, upper_xy = aabb[:, :2]
+                    lower_xy = lower_xy + 0.01
+                    upper_xy = upper_xy - 0.01
+                    sampled_xy = lower_xy + torch.rand(num_particles, 2, device=world.device) * (upper_xy - lower_xy)
+                    sampled_z = aabb[1, 2].expand(num_particles) + 0.02 + config.world_activation_distance
+                    sampled_yaw = sample_yaw(num_particles, num_faces=None, device=world.device)
+                    sampled_push = torch.cat([sampled_xy, sampled_z[:, None], sampled_yaw[:, None]], dim=1)
+
                 particles[push_pose] = sampled_push
 
                 # Transform from tool to hand frame
