@@ -40,6 +40,19 @@ from cutamp.utils.shapes import sample_greedy_surface_spheres
 _log = logging.getLogger(__name__)
 
 
+class _PlanResult(dict):
+    """Wrapper that supports both dict-like and attribute access for motion planning results."""
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(f"'_PlanResult' object has no attribute '{key}'")
+    
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
+
 class TAMPWorld:
     """TAMP world with cuRobo v2 FK, IK, collision, and motion planning backends."""
 
@@ -335,6 +348,20 @@ class TAMPWorld:
         }
         self.motion_planner.update_tool_pose_criteria(criteria)
 
+    @staticmethod
+    def _plan_result_success(result: object | None) -> bool:
+        success = getattr(result, "success", None)
+        if isinstance(success, bool):
+            return success
+        if isinstance(success, torch.Tensor):
+            return bool(success.any().item())
+        return False
+
+    @staticmethod
+    def _plan_result_failure(status: str = "planning_failed") -> _PlanResult:
+        return _PlanResult({"success": False, "status": status})
+
+
     def plan_pose(
         self,
         start_js: JointState,
@@ -358,7 +385,10 @@ class TAMPWorld:
         finally:
             self.set_linear_motion_criteria(None)
 
-        if result.success or not allow_detached_retry:
+        if result is None:
+            result = self._plan_result_failure()
+
+        if self._plan_result_success(result) or not allow_detached_retry:
             return result
 
         object_name = self._attached_object_name
@@ -375,6 +405,9 @@ class TAMPWorld:
             )
         finally:
             self.set_linear_motion_criteria(None)
+
+        if result is None:
+            result = self._plan_result_failure()
 
         if object_name is not None and joint_state is not None:
             self.attach_scene_object(joint_state, object_name)
@@ -400,7 +433,10 @@ class TAMPWorld:
             enable_graph_attempt=enable_graph_attempt,
         )
 
-        if result.success or not allow_detached_retry:
+        if result is None:
+            result = self._plan_result_failure()
+
+        if self._plan_result_success(result) or not allow_detached_retry:
             return result
 
         object_name = self._attached_object_name
@@ -413,6 +449,9 @@ class TAMPWorld:
             max_attempts=max_attempts,
             enable_graph_attempt=enable_graph_attempt,
         )
+
+        if result is None:
+            result = self._plan_result_failure()
 
         if object_name is not None and joint_state is not None:
             self.attach_scene_object(joint_state, object_name)
