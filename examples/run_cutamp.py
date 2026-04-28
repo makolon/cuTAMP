@@ -254,7 +254,7 @@ def entrypoint():
     parser.add_argument(
         "--motion-refinement-mode",
         choices=("ee_strict", "joint"),
-        default=None,
+        default="joint",
         help="Optional override for cuTAMP motion refinement mode.",
     )
 

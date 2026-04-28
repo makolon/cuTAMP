@@ -89,7 +89,7 @@ def _segment_debug_payload(
 
 
 def _motion_refinement_mode(config: TAMPConfiguration) -> Literal["ee_strict", "joint"]:
-    mode = getattr(config, "motion_refinement_mode", "ee_strict")
+    mode = getattr(config, "motion_refinement_mode", "joint")
     if mode not in {"ee_strict", "joint"}:
         raise ValueError(f"Unsupported motion refinement mode: {mode}")
     return mode
