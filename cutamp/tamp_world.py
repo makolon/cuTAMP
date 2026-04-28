@@ -12,7 +12,6 @@ import copy
 import itertools
 import logging
 from functools import cached_property
-from types import SimpleNamespace
 from typing import Dict, List, Literal, Union
 
 import torch
@@ -336,19 +335,6 @@ class TAMPWorld:
         }
         self.motion_planner.update_tool_pose_criteria(criteria)
 
-    @staticmethod
-    def _plan_result_success(result: object | None) -> bool:
-        success = getattr(result, "success", None)
-        if isinstance(success, bool):
-            return success
-        if isinstance(success, torch.Tensor):
-            return bool(success.any().item())
-        return False
-
-    @staticmethod
-    def _plan_result_failure(status: str = "planning_failed") -> SimpleNamespace:
-        return SimpleNamespace(success=False, status=status)
-
     def plan_pose(
         self,
         start_js: JointState,
@@ -372,10 +358,7 @@ class TAMPWorld:
         finally:
             self.set_linear_motion_criteria(None)
 
-        if result is None:
-            result = self._plan_result_failure()
-
-        if self._plan_result_success(result) or not allow_detached_retry:
+        if result.success or not allow_detached_retry:
             return result
 
         object_name = self._attached_object_name
@@ -392,9 +375,6 @@ class TAMPWorld:
             )
         finally:
             self.set_linear_motion_criteria(None)
-
-        if result is None:
-            result = self._plan_result_failure()
 
         if object_name is not None and joint_state is not None:
             self.attach_scene_object(joint_state, object_name)
@@ -420,10 +400,7 @@ class TAMPWorld:
             enable_graph_attempt=enable_graph_attempt,
         )
 
-        if result is None:
-            result = self._plan_result_failure()
-
-        if self._plan_result_success(result) or not allow_detached_retry:
+        if result.success or not allow_detached_retry:
             return result
 
         object_name = self._attached_object_name
@@ -436,9 +413,6 @@ class TAMPWorld:
             max_attempts=max_attempts,
             enable_graph_attempt=enable_graph_attempt,
         )
-
-        if result is None:
-            result = self._plan_result_failure()
 
         if object_name is not None and joint_state is not None:
             self.attach_scene_object(joint_state, object_name)
