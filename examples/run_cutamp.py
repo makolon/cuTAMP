@@ -6,21 +6,34 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
+import argparse
 import cProfile
 import contextlib
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 import torch
 
+from curobo.cuda_robot_model.cuda_robot_model import (
+    CudaRobotModel,
+    CudaRobotModelConfig,
+)
+from curobo.types.base import TensorDeviceType
+from curobo.util_file import (
+    get_robot_configs_path,
+    join_path,
+    load_yaml,
+)
+from cutamp.robots import RobotContainer
 from cutamp.algorithm import run_cutamp
 from cutamp.config import TAMPConfiguration, validate_tamp_config
 from cutamp.constraint_checker import ConstraintChecker
 from cutamp.cost_reduction import CostReducer
 from cutamp.envs import TAMPEnvironment, get_env_dir, load_env
-from envs import load_book_shelf_env, load_stick_button_env, load_tetris_env
-from utils import (
+from .envs import load_book_shelf_env, load_stick_button_env, load_tetris_env
+from .utils import (
     default_constraint_to_mult,
     default_constraint_to_tol,
     setup_logging,
@@ -28,6 +41,90 @@ from utils import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+_ROBOT_TO_CUROBO_CONFIG = {
+    # Franka / Panda aliases
+    "panda": "franka.yml",
+    "franka": "franka.yml",
+    "franka_panda": "franka.yml",
+    # UR aliases
+    "ur5e": "ur5e.yml",
+    "ur10e": "ur10e.yml",
+    # Keep these only if these yaml files actually exist in your cuRobo install
+    "ur5": "ur5.yml",
+    "fr3": "fr3.yml",
+    "fr3_franka": "fr3.yml",
+    "fr3_robotiq": "fr3.yml",
+}
+
+
+def resolve_curobo_robot_config(robot_name: str) -> str:
+    robot_config = _ROBOT_TO_CUROBO_CONFIG.get(robot_name, f"{robot_name}.yml")
+    robot_config_path = join_path(get_robot_configs_path(), robot_config)
+
+    if not Path(robot_config_path).exists():
+        available = sorted(
+            path.name for path in Path(get_robot_configs_path()).glob("*.yml")
+        )
+        raise FileNotFoundError(
+            f"cuRobo robot config not found: {robot_config_path}\n"
+            f"robot_name={robot_name!r}, resolved_config={robot_config!r}\n"
+            f"Available configs: {available}"
+        )
+
+    return robot_config
+
+
+def load_demo_robot(robot_name: str) -> tuple[RobotContainer, torch.Tensor]:
+    """Load a cuRobo v1 robot model expected by the core cuTAMP API."""
+    robot_config = resolve_curobo_robot_config(robot_name)
+    robot_config_path = join_path(get_robot_configs_path(), robot_config)
+
+    tensor_args = TensorDeviceType()
+    robot_cfg = load_yaml(robot_config_path)
+
+    kin_cfg = CudaRobotModelConfig.from_robot_yaml_file(
+        robot_config_path,
+        tensor_args=tensor_args,
+    )
+    kin_model = CudaRobotModel(kin_cfg)
+
+    joint_limits = kin_model.get_joint_limits().position
+    q_init = kin_model.retract_config.clone().reshape(-1)
+
+    tool_from_ee = torch.eye(
+        4,
+        device=tensor_args.device,
+        dtype=tensor_args.dtype,
+    )
+
+    if robot_name in {"panda", "franka", "franka_panda"}:
+        tool_from_ee[:3, :3] = torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            device=tensor_args.device,
+            dtype=tensor_args.dtype,
+        )
+        tool_from_ee[:3, 3] = torch.tensor(
+            [0.0, 0.0, 0.105],
+            device=tensor_args.device,
+            dtype=tensor_args.dtype,
+        )
+
+    robot = RobotContainer(
+        name=robot_name,
+        kin_model=kin_model,
+        joint_limits=joint_limits,
+        gripper_spheres=kin_model.robot_spheres,
+        tool_from_ee=tool_from_ee,
+        robot_cfg=robot_cfg,
+    )
+
+    return robot, q_init
 
 
 def load_demo_env(name: str) -> TAMPEnvironment:
@@ -71,15 +168,22 @@ def cutamp_demo(
     )
     cost_reducer = CostReducer(constraint_to_mult)
     constraint_checker = ConstraintChecker(default_constraint_to_tol.copy())
+    robot, q_init = load_demo_robot(config.robot)
 
-    plan, _, failure_reason = run_cutamp(env, config, cost_reducer, constraint_checker, experiment_id=experiment_id)
-    if plan is None:
+    curobo_plan, _, failure_reason = run_cutamp(
+        env,
+        config,
+        robot,
+        cost_reducer,
+        constraint_checker,
+        q_init=q_init,
+        experiment_id=experiment_id,
+    )
+    if curobo_plan is None:
         _log.warning(f"No plan found: {failure_reason}")
 
 
 def entrypoint():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Run cuTAMP demo. We do not expose all the configs so check cutamp/config.py for additional configs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -193,7 +297,7 @@ def entrypoint():
         help="Disable robot mesh visualization to save visualization bandwidth.",
     )
     parser.add_argument(
-        "--experiment_root", type=str, default="/tmp/cutamp-experiments", help="Root directory for experiment logging."
+        "--experiment_root", type=str, default="cutamp-experiments", help="Root directory for experiment logging."
     )
     parser.add_argument(
         "--experiment_id",
