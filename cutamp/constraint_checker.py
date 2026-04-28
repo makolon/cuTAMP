@@ -67,8 +67,8 @@ class ConstraintChecker:
             for name, values in cost_info["values"].items():
                 tol = self._get_tol(cost_type, name)
                 mask = values <= tol
-                if mask.ndim == 2:
-                    mask = mask.all(dim=1)  # satisfy over time dimension
+                if mask.ndim > 1:
+                    mask = mask.flatten(1).all(dim=1)  # satisfy across all non-batch dimensions
                 overall_mask = mask if overall_mask is None else overall_mask & mask
 
                 if verbose:

@@ -22,7 +22,6 @@ from curobo.scene import (
     Scene,
     Sphere,
 )
-from curobo.types import DeviceCfg
 from einops import einsum
 from jaxtyping import Float
 from roma import quat_wxyz_to_xyzw, unitquat_to_rotmat
@@ -175,8 +174,10 @@ def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> Scene
             geoms["cylinder"].append(obj)
         elif isinstance(obj, Capsule):
             geoms["capsule"].append(obj)
-        elif isinstance(obj, (MultiSphere, Mesh)):
-            # Need to use mesh for MultiSphere
+        elif isinstance(obj, MultiSphere):
+            # curobo does not accept MultiSphere directly in Scene; convert it to Mesh.
+            geoms["mesh"].append(obj.get_mesh(process=False))
+        elif isinstance(obj, Mesh):
             geoms["mesh"].append(obj)
         else:
             raise ValueError(f"Unknown object type: {type(obj)}")

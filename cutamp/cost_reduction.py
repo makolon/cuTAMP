@@ -36,8 +36,8 @@ class CostReducer:
                 continue
 
             for name, values in entry["values"].items():
-                if values.ndim == 2:
-                    values = values.sum(dim=1)  # Sum over time
+                if values.ndim > 1:
+                    values = values.flatten(1).sum(dim=1)  # Sum across all non-batch dimensions
                 multiplier = self._get_multiplier(cost_type, name)
                 if multiplier is not None:
                     values = values * multiplier

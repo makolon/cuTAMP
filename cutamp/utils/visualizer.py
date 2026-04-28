@@ -8,6 +8,7 @@
 # its affiliates is strictly prohibited.
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Union, Optional, Any
 
 import numpy as np
@@ -135,6 +136,9 @@ class RerunVisualizer(Visualizer):
             rr.init(application_id, recording_id=recording_id, spawn=spawn)
         self.robot = rerun_robot
         super().__init__(config, q_init)
+
+    def save(self, path: str | Path):
+        rr.save(str(path))
 
     def set_time_sequence(self, timeline: str, val: int):
         rr.set_time(timeline, sequence=val)

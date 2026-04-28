@@ -53,8 +53,8 @@ def heuristic_fn(
     num_particles = None
     for con_type, con_info in full_mask.items():
         for name, mask in con_info.items():
-            if mask.ndim == 2:
-                satisfying = mask.sum(0)
+            if mask.ndim > 1:
+                satisfying = mask.flatten(1).sum(0)
             else:
                 satisfying = mask.sum()
 
@@ -328,6 +328,8 @@ def setup_cutamp(
         else MockVisualizer()
     )
     if config.enable_visualizer:
+        if config.rr_init and exp_logger is not None and isinstance(visualizer, RerunVisualizer):
+            visualizer.save(exp_logger.exp_dir / "rerun.rrd")
         visualizer.log_tamp_world(world)
     return exp_logger, visualizer, timer, world
 

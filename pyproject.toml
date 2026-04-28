@@ -67,8 +67,6 @@ cutamp = [
 torchaudio = { index = "torch" }
 torch = { index = "torch" }
 torchvision = { index = "torch" }
-
-# Local sources
 nvidia-curobo = { git = "https://github.com/NVlabs/curobo.git" }
 
 [[tool.uv.index]]

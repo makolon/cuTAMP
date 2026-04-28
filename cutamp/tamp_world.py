@@ -6,11 +6,13 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
+from __future__ import annotations
 
 import copy
 import itertools
 import logging
 from functools import cached_property
+from types import SimpleNamespace
 from typing import Dict, List, Literal, Union
 
 import torch
@@ -40,7 +42,7 @@ _log = logging.getLogger(__name__)
 
 
 class TAMPWorld:
-    """TAMP world with cuRobo v2 backends for FK, IK, motion planning, and collision."""
+    """TAMP world with cuRobo v2 FK, IK, collision, and motion planning backends."""
 
     def __init__(
         self,
@@ -53,19 +55,23 @@ class TAMPWorld:
         coll_n_spheres: int = 50,
         coll_sphere_radius: float = 0.005,
         motion_refinement_mode: Literal["ee_strict", "joint"] = "ee_strict",
+        use_cuda_graph: bool = True,
     ):
         self.env = env
         self.device_cfg = device_cfg
-
-        self._movable_names = {obj.name for obj in env.movables}
-        self._name_to_obj = {obj.name: obj for obj in env.movables + env.statics}
-
         self.robot_container = robot
-        self.robot_name = self.robot_container.name
+        self.robot_name = robot.name
         self.q_init = self.device_cfg.to_device(q_init)
         self.ik_solver_batch_size = ik_batch_size
         self.motion_refinement_mode = motion_refinement_mode
         self.collision_activation_distance = collision_activation_distance
+        self.use_cuda_graph = use_cuda_graph
+
+        self._movable_names = {obj.name for obj in env.movables}
+        self._name_to_obj = {obj.name: obj for obj in env.movables + env.statics}
+        self._obj_to_aabb: dict[str, torch.Tensor] = {}
+        self._attached_object_name: str | None = None
+        self._attached_joint_state: JointState | None = None
 
         self._obj_to_spheres: Dict[str, Float[torch.Tensor, "n 4"]] = {}
         for obj in self.movables:
@@ -74,46 +80,46 @@ class TAMPWorld:
                 n_spheres=coll_n_spheres,
                 sphere_radius=coll_sphere_radius,
             )
-            self._obj_to_spheres[obj.name] = spheres.to(self.device_cfg.device)
+            self._obj_to_spheres[obj.name] = spheres.to(self.device)
 
-        self._static_scene = get_world_cfg(env, include_movables=False)
-        self._planning_scene = get_world_cfg(env, include_movables=True)
-        self._runtime_scene = self._planning_scene.clone()
+        self.static_scene = get_world_cfg(env, include_movables=False)
+        self.scene = get_world_cfg(env, include_movables=True)
+
         self.collision_fn = get_world_collision_cost(
-            self._static_scene,
+            self.static_scene,
             self.device_cfg,
-            collision_activation_distance,
+            self.collision_activation_distance,
         )
 
-        self.robot_collision_checker = self.get_robot_collision_checker()
-        self.ik_solver = self.get_ik_solver()
-        self.motion_planner = self.get_motion_planner()
-        self._default_tool_pose_criteria = {
+        self.robot_collision_checker = self.create_robot_collision_checker()
+        self.ik_solver = self.create_ik_solver()
+        self.motion_planner = self.create_motion_planner()
+
+        self.default_tool_pose_criteria = {
             tool_frame: ToolPoseCriteria(device_cfg=self.device_cfg)
             for tool_frame in self.motion_planner.tool_frames
         }
-        self.motion_planner.update_tool_pose_criteria(self._default_tool_pose_criteria)
-
-        self._attached_object_name: str | None = None
-        self._attached_joint_state: JointState | None = None
-        self._obj_to_aabb: dict[str, torch.Tensor] = {}
+        self.motion_planner.update_tool_pose_criteria(self.default_tool_pose_criteria)
 
     @property
     def movables(self) -> List[Obstacle]:
         return self.env.movables
-
-    def is_movable(self, obj: Obstacle | str) -> bool:
-        if isinstance(obj, Obstacle):
-            obj = obj.name
-        return obj in self._movable_names
 
     @property
     def statics(self) -> List[Obstacle]:
         return self.env.statics
 
     @property
+    def device(self) -> torch.device:
+        return self.device_cfg.device
+
+    @property
     def kinematics(self):
         return self.robot_container.kinematics
+
+    @property
+    def tool_frame(self) -> str:
+        return self.robot_container.tool_frame
 
     @property
     def tool_from_ee(self) -> Float[torch.Tensor, "4 4"]:
@@ -124,16 +130,8 @@ class TAMPWorld:
         return torch.linalg.inv(self.tool_from_ee)
 
     @property
-    def tool_frame(self) -> str:
-        return self.robot_container.tool_frame
-
-    @property
     def joint_names(self) -> list[str]:
         return list(self.robot_container.joint_names)
-
-    @property
-    def device(self) -> torch.device:
-        return self.device_cfg.device
 
     @property
     def initial_state(self) -> State:
@@ -148,9 +146,19 @@ class TAMPWorld:
     def goal_state(self) -> State:
         return self.env.goal_state
 
+    @cached_property
+    def world_aabb(self) -> Float[torch.Tensor, "2 3"]:
+        aabbs = [self.get_aabb(obj) for obj in self.movables]
+        aabbs += [self.get_aabb(obj) for obj in self.statics]
+        stacked = torch.stack(aabbs)
+        lower = stacked[:, 0].min(dim=0).values
+        upper = stacked[:, 1].max(dim=0).values
+        return torch.stack([lower, upper])
+
     def get_objects_by_type(self, obj_type: str, return_name: bool = True) -> List[Union[Obstacle, str]]:
         if obj_type not in self.env.type_to_objects:
             return []
+
         objects = self.env.type_to_objects[obj_type]
         if return_name:
             return [obj.name for obj in objects]
@@ -164,38 +172,38 @@ class TAMPWorld:
     def has_object(self, name: str) -> bool:
         return name in self._name_to_obj
 
-    def get_object_pose(self, obj: Union[Obstacle, str]) -> Float[torch.Tensor, "4 4"]:
-        obj = obj if isinstance(obj, Obstacle) else self.get_object(obj)
-        pose = Pose.from_list(obj.pose, self.device_cfg)
-        return pose.get_matrix()[0]
+    def is_movable(self, obj: Obstacle | str) -> bool:
+        obj_name = obj.name if isinstance(obj, Obstacle) else obj
+        return obj_name in self._movable_names
 
-    def get_collision_spheres(self, obj: Union[Obstacle, str]) -> Float[torch.Tensor, "n 4"]:
+    def get_object_pose(self, obj: Obstacle | str) -> Float[torch.Tensor, "4 4"]:
+        obstacle = obj if isinstance(obj, Obstacle) else self.get_object(obj)
+        return Pose.from_list(obstacle.pose, self.device_cfg).get_matrix()[0]
+
+    def get_collision_spheres(self, obj: Obstacle | str) -> Float[torch.Tensor, "n 4"]:
         obj_name = obj.name if isinstance(obj, Obstacle) else obj
         return self._obj_to_spheres[obj_name]
 
-    def get_aabb(self, obj: Union[Obstacle, str]) -> Float[torch.Tensor, "2 3"]:
+    def get_aabb(self, obj: Obstacle | str) -> Float[torch.Tensor, "2 3"]:
         obj_name = obj.name if isinstance(obj, Obstacle) else obj
+
         if obj_name not in self._obj_to_aabb:
             self._obj_to_aabb[obj_name] = approximate_goal_aabb(self.get_object(obj_name)).to(self.device)
+
         return self._obj_to_aabb[obj_name]
 
-    @cached_property
-    def world_aabb(self) -> Float[torch.Tensor, "2 3"]:
-        aabbs = [self.get_aabb(obj) for obj in self.movables] + [self.get_aabb(obj) for obj in self.statics]
-        stacked = torch.stack(aabbs)
-        union_lower = stacked[:, 0].min(dim=0).values
-        union_upper = stacked[:, 1].max(dim=0).values
-        return torch.stack([union_lower, union_upper])
-
     def joint_state_from_position(self, position: torch.Tensor) -> JointState:
-        position = self.device_cfg.to_device(position)
-        return JointState.from_position(position, joint_names=self.joint_names)
+        return JointState.from_position(
+            self.device_cfg.to_device(position),
+            joint_names=self.joint_names,
+        )
 
     def ensure_joint_state(self, joint_state: JointState | torch.Tensor) -> JointState:
         if isinstance(joint_state, JointState):
             if joint_state.joint_names == self.joint_names:
                 return joint_state
             return JointState.from_position(joint_state.position, joint_names=self.joint_names)
+
         return self.joint_state_from_position(joint_state)
 
     def compute_kinematics(self, joint_state: JointState | torch.Tensor):
@@ -207,31 +215,48 @@ class TAMPWorld:
 
     def compute_ee_matrix(self, joint_state: JointState | torch.Tensor) -> torch.Tensor:
         matrix = self.compute_tool_pose(joint_state).get_matrix() @ self.ee_from_tool
-        return matrix[0] if matrix.shape[0] == 1 else matrix
+        if matrix.shape[0] == 1:
+            return matrix[0]
+        return matrix
 
     def warmup_ik_solver(self, num_particles: int):
         q = sample_between_bounds(num_particles, bounds=self.robot_container.joint_limits)
         world_from_ee = self.compute_ee_matrix(self.joint_state_from_position(q))
-        _ = self.solve_pose(world_from_ee, return_seeds=1)
+        self.solve_pose(world_from_ee, return_seeds=1)
 
     def warmup_motion_gen(self):
         self.motion_planner.warmup(enable_graph=True)
 
-    def _planner_robot_cfg(self) -> dict:
+    def robot_cfg_with_attachment_capacity(self) -> dict:
         robot_cfg = copy.deepcopy(self.robot_container.robot_cfg)
+
         kinematics_cfg = robot_cfg.setdefault("robot_cfg", {}).setdefault("kinematics", {})
         extra_collision_spheres = kinematics_cfg.setdefault("extra_collision_spheres", {})
+
         if self._obj_to_spheres:
-            extra_collision_spheres["attached_object"] = max(len(spheres) for spheres in self._obj_to_spheres.values())
+            extra_collision_spheres["attached_object"] = max(
+                len(spheres) for spheres in self._obj_to_spheres.values()
+            )
         else:
             extra_collision_spheres["attached_object"] = 0
+
         return robot_cfg
 
-    def get_robot_collision_checker(self) -> RobotCollisionChecker:
-        cache = {"mesh": max(16, len(getattr(self._planning_scene, "mesh", ()) or ())), "primitive": max(64, len(self.movables) + len(self.statics) + 8)}
+    def collision_cache(self) -> dict:
+        num_meshes = len(getattr(self.scene, "mesh", ()) or ())
+        num_obstacles = len(self.movables) + len(self.statics)
+
+        return {
+            "mesh": max(16, num_meshes),
+            "primitive": max(64, num_obstacles + 8),
+        }
+
+    def create_robot_collision_checker(self) -> RobotCollisionChecker:
+        cache = self.collision_cache()
+
         checker_cfg = RobotCollisionCheckerCfg.load_from_config(
-            robot_config=self._planner_robot_cfg(),
-            scene_model=self._runtime_scene,
+            robot_config=self.robot_cfg_with_attachment_capacity(),
+            scene_model=self.scene,
             device_cfg=self.device_cfg,
             collision_activation_distance=self.collision_activation_distance,
             n_meshes=cache["mesh"],
@@ -239,10 +264,10 @@ class TAMPWorld:
         )
         return RobotCollisionChecker(checker_cfg)
 
-    def get_ik_solver(self, num_seeds: int = 12) -> InverseKinematics:
+    def create_ik_solver(self, num_seeds: int = 12) -> InverseKinematics:
         ik_cfg = InverseKinematicsCfg.create(
-            robot=self._planner_robot_cfg(),
-            scene_model=self._runtime_scene,
+            robot=self.robot_cfg_with_attachment_capacity(),
+            scene_model=self.scene,
             device_cfg=self.device_cfg,
             num_seeds=num_seeds,
             max_batch_size=self.ik_solver_batch_size,
@@ -253,14 +278,13 @@ class TAMPWorld:
         )
         return InverseKinematics(ik_cfg)
 
-    def get_motion_planner(self, use_cuda_graph: bool = True) -> MotionPlanner:
-        cache = {"mesh": max(16, len(getattr(self._planning_scene, "mesh", ()) or ())), "primitive": max(64, len(self.movables) + len(self.statics) + 8)}
+    def create_motion_planner(self) -> MotionPlanner:
         motion_cfg = MotionPlannerCfg.create(
-            robot=self._planner_robot_cfg(),
-            scene_model=self._runtime_scene,
+            robot=self.robot_cfg_with_attachment_capacity(),
+            scene_model=self.scene,
             device_cfg=self.device_cfg,
-            collision_cache=cache,
-            use_cuda_graph=use_cuda_graph,
+            collision_cache=self.collision_cache(),
+            use_cuda_graph=self.use_cuda_graph,
             num_ik_seeds=12,
             num_trajopt_seeds=4,
             position_tolerance=0.005,
@@ -269,11 +293,15 @@ class TAMPWorld:
         )
         return MotionPlanner(motion_cfg)
 
-    def _goal_tool_pose(self, desired_world_from_ee: torch.Tensor) -> GoalToolPose:
+    def goal_tool_pose(self, desired_world_from_ee: torch.Tensor) -> GoalToolPose:
         desired_world_from_tool = desired_world_from_ee @ self.tool_from_ee
         desired_pose = Pose.from_matrix(
-            desired_world_from_tool.to(device=self.device_cfg.device, dtype=self.device_cfg.dtype)
+            desired_world_from_tool.to(
+                device=self.device_cfg.device,
+                dtype=self.device_cfg.dtype,
+            )
         )
+
         return GoalToolPose.from_poses(
             {self.tool_frame: desired_pose},
             ordered_tool_frames=[self.tool_frame],
@@ -289,22 +317,37 @@ class TAMPWorld:
         return_seeds: int = 1,
     ):
         desired_world_from_ee = self.device_cfg.to_device(desired_world_from_ee)
+
         return self.ik_solver.solve_pose(
-            self._goal_tool_pose(desired_world_from_ee),
+            self.goal_tool_pose(desired_world_from_ee),
             current_state=current_state,
             seed_config=seed_config,
             return_seeds=return_seeds,
         )
 
-    def _set_linear_motion_criteria(self, axis: str | None):
+    def set_linear_motion_criteria(self, axis: str | None):
         if axis is None:
-            self.motion_planner.update_tool_pose_criteria(self._default_tool_pose_criteria)
+            self.motion_planner.update_tool_pose_criteria(self.default_tool_pose_criteria)
             return
+
         criteria = {
             tool_frame: ToolPoseCriteria.linear_motion(axis=axis)
             for tool_frame in self.motion_planner.tool_frames
         }
         self.motion_planner.update_tool_pose_criteria(criteria)
+
+    @staticmethod
+    def _plan_result_success(result: object | None) -> bool:
+        success = getattr(result, "success", None)
+        if isinstance(success, bool):
+            return success
+        if isinstance(success, torch.Tensor):
+            return bool(success.any().item())
+        return False
+
+    @staticmethod
+    def _plan_result_failure(status: str = "planning_failed") -> SimpleNamespace:
+        return SimpleNamespace(success=False, status=status)
 
     def plan_pose(
         self,
@@ -318,22 +361,44 @@ class TAMPWorld:
     ):
         start_js = self.ensure_joint_state(start_js)
 
-        def run_once():
-            self._set_linear_motion_criteria(linear_axis)
-            try:
-                return self.motion_planner.plan_pose(
-                    self._goal_tool_pose(desired_world_from_ee),
-                    start_js,
-                    max_attempts=max_attempts,
-                    enable_graph_attempt=enable_graph_attempt,
-                )
-            finally:
-                self._set_linear_motion_criteria(None)
+        self.set_linear_motion_criteria(linear_axis)
+        try:
+            result = self.motion_planner.plan_pose(
+                self.goal_tool_pose(desired_world_from_ee),
+                start_js,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt,
+            )
+        finally:
+            self.set_linear_motion_criteria(None)
 
-        result = run_once()
-        if not result.success and allow_detached_retry:
-            with self.detached_attached_object():
-                result = run_once()
+        if result is None:
+            result = self._plan_result_failure()
+
+        if self._plan_result_success(result) or not allow_detached_retry:
+            return result
+
+        object_name = self._attached_object_name
+        joint_state = self._attached_joint_state
+        self.detach_attached_object()
+
+        self.set_linear_motion_criteria(linear_axis)
+        try:
+            result = self.motion_planner.plan_pose(
+                self.goal_tool_pose(desired_world_from_ee),
+                start_js,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt,
+            )
+        finally:
+            self.set_linear_motion_criteria(None)
+
+        if result is None:
+            result = self._plan_result_failure()
+
+        if object_name is not None and joint_state is not None:
+            self.attach_scene_object(joint_state, object_name)
+
         return result
 
     def plan_cspace(
@@ -348,59 +413,77 @@ class TAMPWorld:
         start_js = self.ensure_joint_state(start_js)
         goal_js = self.ensure_joint_state(goal_js)
 
-        def run_once():
-            return self.motion_planner.plan_cspace(
-                goal_js,
-                start_js,
-                max_attempts=max_attempts,
-                enable_graph_attempt=enable_graph_attempt,
-            )
+        result = self.motion_planner.plan_cspace(
+            goal_js,
+            start_js,
+            max_attempts=max_attempts,
+            enable_graph_attempt=enable_graph_attempt,
+        )
 
-        result = run_once()
-        if not result.success and allow_detached_retry:
-            with self.detached_attached_object():
-                result = run_once()
+        if result is None:
+            result = self._plan_result_failure()
+
+        if self._plan_result_success(result) or not allow_detached_retry:
+            return result
+
+        object_name = self._attached_object_name
+        joint_state = self._attached_joint_state
+        self.detach_attached_object()
+
+        result = self.motion_planner.plan_cspace(
+            goal_js,
+            start_js,
+            max_attempts=max_attempts,
+            enable_graph_attempt=enable_graph_attempt,
+        )
+
+        if result is None:
+            result = self._plan_result_failure()
+
+        if object_name is not None and joint_state is not None:
+            self.attach_scene_object(joint_state, object_name)
+
         return result
 
     def update_world(self, scene: Scene):
-        self._runtime_scene = scene.clone()
-        self.motion_planner.update_world(self._runtime_scene)
-        self.ik_solver.update_world(self._runtime_scene)
-        self.robot_collision_checker.update_world(self._runtime_scene)
+        """Replace the cuRobo planning scene.
 
-    def reset_runtime_scene(self, obj_to_pose: dict[str, torch.Tensor]):
-        scene = self._planning_scene.clone()
+        The scene must already be canonicalized by get_world_cfg().
+        MultiSphere or other cuTAMP-only objects must not be included here.
+        """
+        self.scene = scene.clone()
+        self.motion_planner.update_world(self.scene)
+        self.ik_solver.update_world(self.scene)
+        self.robot_collision_checker.update_world(self.scene)
+
+    def reset_scene(self, obj_to_pose: dict[str, torch.Tensor]):
+        """Rebuild the canonical cuRobo planning scene and set object poses."""
+        scene = get_world_cfg(self.env, include_movables=True)
+
         for obj_name, obj_pose in obj_to_pose.items():
             obstacle = scene.get_obstacle(obj_name)
-            if obstacle is None:
-                continue
-            obstacle.pose = Pose.from_matrix(obj_pose).tolist()
-        self.motion_planner.attachment_manager.detach()
+            if obstacle is not None:
+                obstacle.pose = Pose.from_matrix(obj_pose).tolist()
+
         self._attached_object_name = None
         self._attached_joint_state = None
         self.update_world(scene)
 
     def update_object_pose(self, obj_name: str, obj_pose: torch.Tensor):
-        updated_scene = self._runtime_scene.clone()
-        obstacle = updated_scene.get_obstacle(obj_name)
+        scene = self.scene.clone()
+        obstacle = scene.get_obstacle(obj_name)
+
         if obstacle is None:
-            raise ValueError(f"Obstacle '{obj_name}' not found in runtime scene")
+            raise ValueError(f"Obstacle '{obj_name}' not found in planning scene")
+
         obstacle.pose = Pose.from_matrix(obj_pose).tolist()
-        self.update_world(updated_scene)
+        self.update_world(scene)
 
     def attach_scene_object(self, joint_state: JointState, object_name: str):
-        self.motion_planner.attachment_manager.attach_from_scene(
-            joint_states=self.ensure_joint_state(joint_state),
-            obstacle_names=[object_name],
-            link_name="attached_object",
-            num_spheres=int(self.get_collision_spheres(object_name).shape[0]),
-            surface_radius=0.005,
-        )
         self._attached_object_name = object_name
         self._attached_joint_state = self.ensure_joint_state(joint_state).clone()
 
     def detach_attached_object(self, enable_obstacle_names: list[str] | None = None):
-        self.motion_planner.attachment_manager.detach(enable_obstacle_names=enable_obstacle_names)
         self._attached_object_name = None
         self._attached_joint_state = None
 
@@ -415,6 +498,7 @@ def check_tamp_world_not_in_collision(
         obj_pose = Pose.from_list(obj.pose, world.device_cfg).get_matrix()[0]
         spheres = transform_spheres(world.get_collision_spheres(obj), obj_pose)[None, None].contiguous()
         coll_cost = world.collision_fn(spheres).sum()
+
         if coll_cost > collision_tol:
             _log.warning("Initial state in collision for object '%s' with cost %s", obj.name, coll_cost)
 
@@ -422,6 +506,7 @@ def check_tamp_world_not_in_collision(
         obj.name: transform_spheres(world.get_collision_spheres(obj), world.get_object_pose(obj))
         for obj in world.movables
     }
+
     for obj_1, obj_2 in itertools.combinations(world.movables, 2):
         coll_cost = sphere_to_sphere_overlap(
             obj_to_spheres[obj_1.name],
@@ -429,6 +514,7 @@ def check_tamp_world_not_in_collision(
             activation_distance=movable_activation_dist,
             use_aabb_check=True,
         )
+
         if coll_cost > collision_tol:
             _log.warning(
                 "Initial state in collision between %s and %s with cost %s",

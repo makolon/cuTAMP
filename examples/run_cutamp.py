@@ -6,6 +6,7 @@
 # disclosure or distribution of this material and related documentation
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
+import argparse
 import cProfile
 import contextlib
 import logging
@@ -140,8 +141,6 @@ def cutamp_demo(
 
 
 def entrypoint():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Run cuTAMP demo. We do not expose all the configs so check cutamp/config.py for additional configs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -273,7 +272,7 @@ def entrypoint():
         help="Disable robot mesh visualization to save visualization bandwidth.",
     )
     parser.add_argument(
-        "--experiment_root", type=str, default="/tmp/cutamp-experiments", help="Root directory for experiment logging."
+        "--experiment_root", type=str, default="cutamp-experiments", help="Root directory for experiment logging."
     )
     parser.add_argument(
         "--experiment_id",
