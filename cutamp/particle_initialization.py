@@ -13,6 +13,7 @@ from typing import Optional
 
 import torch
 from curobo.scene import Cuboid
+from curobo.types import Pose
 
 from cutamp.config import TAMPConfiguration
 from cutamp.costs import sphere_to_sphere_overlap
@@ -32,7 +33,6 @@ from cutamp.utils.common import (
     Particles,
     action_4dof_to_mat4x4,
     action_6dof_to_mat4x4,
-    pose_list_to_mat4x4,
     sample_between_bounds,
     transform_spheres,
 )
@@ -185,8 +185,9 @@ class ParticleInitializer:
                     )
                     source = "Heuristic"
 
-                world_from_obj = pose_list_to_mat4x4(world.get_object(obj).pose).to(world.device)
-                world_from_ee = world_from_obj @ grasp_transforms
+                world_from_obj = Pose.from_list(world.get_object(obj).pose).get_matrix()[0].to(world.device)
+                world_from_grasp = world_from_obj @ grasp_transforms
+                world_from_ee = world_from_grasp @ world.tool_from_ee
 
                 # Solve IK with cuRobo
                 ik_result = world.solve_pose(
@@ -306,7 +307,10 @@ class ParticleInitializer:
                         obj_from_grasp = action_4dof_to_mat4x4(particles[grasp])
                     else:
                         obj_from_grasp = action_6dof_to_mat4x4(particles[grasp])
-                    world_from_ee = world_from_obj @ obj_from_grasp
+
+                    world_from_grasp = world_from_obj @ obj_from_grasp
+                    world_from_ee = world_from_grasp @ world.tool_from_ee
+
                     ik_result = world.solve_pose(
                         world_from_ee,
                         return_seeds=1,
@@ -373,11 +377,12 @@ class ParticleInitializer:
                     sampled_push = torch.cat([sampled_xy, sampled_z[:, None], sampled_yaw[:, None]], dim=1)
                 particles[push_pose] = sampled_push
 
-                world_from_ee = (
+                world_from_push = (
                     action_4dof_to_mat4x4(sampled_push)
                     if config.push_dof == 4
                     else action_6dof_to_mat4x4(sampled_push)
                 )
+                world_from_ee = world_from_push @ world.tool_from_ee
 
                 # Solve IK with cuRobo
                 ik_result = world.solve_pose(

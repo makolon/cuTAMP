@@ -12,9 +12,7 @@ from collections.abc import Callable
 
 import torch
 from curobo.scene import Cuboid, Scene
-from curobo.types import DeviceCfg
-
-from cutamp.utils.common import pose_list_to_mat4x4
+from curobo.types import DeviceCfg, Pose
 
 _log = logging.getLogger(__name__)
 
@@ -33,7 +31,7 @@ def _sphere_cuboid_signed_distance(
     cuboid: Cuboid,
     device_cfg: DeviceCfg,
 ) -> torch.Tensor:
-    world_from_cuboid = pose_list_to_mat4x4(cuboid.pose).to(
+    world_from_cuboid = Pose.from_list(cuboid.pose).get_matrix()[0].to(
         device=sphere_centers_world.device,
         dtype=sphere_centers_world.dtype,
     )

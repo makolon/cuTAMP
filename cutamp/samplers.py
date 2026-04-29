@@ -11,18 +11,15 @@ from typing import Optional
 
 import torch
 from curobo.scene import Cuboid, Mesh, Obstacle
+from curobo.types import Pose
 from jaxtyping import Float
 
-from cutamp.utils.common import approximate_goal_aabb, pose_list_to_mat4x4, transform_points
+from cutamp.utils.common import approximate_goal_aabb, transform_points
 from cutamp.utils.obb import get_object_obb
 from cutamp.utils.shapes import MultiSphere
 
 Grasp4DOF = Place4DOF = Float[torch.Tensor, "n 4"]
 Grasp6DOF = Place6DOF = Float[torch.Tensor, "n 6"]
-
-
-def _device_dtype(obj_spheres: torch.Tensor) -> tuple[torch.device, torch.dtype]:
-    return obj_spheres.device, obj_spheres.dtype
 
 
 def sample_yaw(num_samples: int, num_faces: Optional[int], device: torch.device) -> torch.Tensor:
@@ -65,7 +62,7 @@ def grasp_4dof_sampler(
     if obj.name == "stick":
         return sample_stick_grasps(num_samples, obj)
 
-    device, dtype = _device_dtype(obj_spheres)
+    device, dtype = obj_spheres.device, obj_spheres.dtype
     if isinstance(obj, Cuboid):
         obj_half_z = max(0.0, obj.dims[2] / 2 - 0.02)
     elif isinstance(obj, MultiSphere):
@@ -89,7 +86,7 @@ def grasp_6dof_sampler(
     if not isinstance(obj, Cuboid):
         raise NotImplementedError("Only Cuboid objects are supported for 6-DOF grasps")
 
-    device, dtype = _device_dtype(obj_spheres)
+    device, dtype = obj_spheres.device, obj_spheres.dtype
     roll_choices = torch.tensor(
         [-torch.pi / 2, -torch.pi / 3, -torch.pi / 4, torch.pi / 4, torch.pi / 3, torch.pi / 2],
         device=device,
@@ -124,7 +121,7 @@ def place_4dof_sampler(
     if not isinstance(surface, (Cuboid, Mesh)):
         raise NotImplementedError(f"Only Cuboid or Mesh surfaces supported for now, not {type(surface)}")
 
-    device, dtype = _device_dtype(obj_spheres)
+    device, dtype = obj_spheres.device, obj_spheres.dtype
     sph_bottom = obj_spheres[:, 2] - obj_spheres[:, 3]
     obj_z_delta = -sph_bottom.min()
     z_offset = torch.empty(num_samples, 1, device=device, dtype=dtype).uniform_(1e-3, 1e-2)
@@ -158,7 +155,7 @@ def place_4dof_sampler(
         )
         z_local = z_offset + obj_z_delta + surface.dims[2] / 2 + collision_activation_dist
         xyz_local = torch.cat([xy_local, z_local], dim=1)
-        surface_mat4x4 = pose_list_to_mat4x4(surface.pose).to(device=device, dtype=dtype)
+        surface_mat4x4 = Pose.from_list(surface.pose).get_matrix()[0].to(device=device, dtype=dtype)
         xyz_world = transform_points(xyz_local, surface_mat4x4)
     elif surface_rep == "aabb" and isinstance(surface, Mesh):
         if shrink_dist is not None:

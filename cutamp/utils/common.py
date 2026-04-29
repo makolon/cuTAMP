@@ -7,7 +7,6 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import logging
 from collections import defaultdict
 from typing import Dict
 
@@ -24,147 +23,132 @@ from curobo.scene import (
 )
 from einops import einsum
 from jaxtyping import Float
-from roma import quat_wxyz_to_xyzw, unitquat_to_rotmat
 
 from cutamp.envs import TAMPEnvironment
 from cutamp.utils.shapes import MultiSphere
 
-_log = logging.getLogger(__name__)
-
 Particles = Dict[str, Float[torch.Tensor, "num_particles *h d"]]
 
 
-def pose_list_to_mat4x4(pose: list[float] | None) -> Float[torch.Tensor, "4 4"]:
-    """cuRobo pose list to 4x4 transformation matrix."""
-    mat4x4 = torch.eye(4)
-    if pose is not None:
-        mat4x4[:3, 3] = torch.tensor(pose[:3])
-        # Curobo stores poses as [x y z qw qx qy qz]
-        quat_wxyz = torch.tensor(pose[3:])
-        quat_xyzw = quat_wxyz_to_xyzw(quat_wxyz)
-        mat4x4[:3, :3] = unitquat_to_rotmat(quat_xyzw)
-    return mat4x4
-
-
 def action_4dof_to_mat4x4(action_4dof: Float[torch.Tensor, "*b 4"]) -> Float[torch.Tensor, "*b 4 4"]:
-    """Convert 4-DOF action to 4x4 transformation matrix."""
+    """Convert 4-DoF action [x, y, z, yaw] to a 4x4 matrix."""
     if action_4dof.shape[-1] != 4:
         raise ValueError(f"Expected last dimension to be 4, got shape {action_4dof.shape}")
 
-    # Create 4x4 matrix and set rotation and translation
     mat4x4 = torch.eye(4, device=action_4dof.device, dtype=action_4dof.dtype)
     mat4x4 = mat4x4.repeat(*action_4dof.shape[:-1], 1, 1)
 
-    # Set the rotation component
     yaw = action_4dof[..., 3]
     cos_yaw = torch.cos(yaw)
     sin_yaw = torch.sin(yaw)
+
     mat4x4[..., 0, 0] = cos_yaw
     mat4x4[..., 0, 1] = -sin_yaw
     mat4x4[..., 1, 0] = sin_yaw
     mat4x4[..., 1, 1] = cos_yaw
-
-    # Set the translation component
     mat4x4[..., :3, 3] = action_4dof[..., :3]
+
     return mat4x4
 
 
 def action_6dof_to_mat4x4(action_6dof: Float[torch.Tensor, "*b 6"]) -> Float[torch.Tensor, "*b 4 4"]:
-    """Convert 6-DOF action (xyz + rpy) to 4x4 transformation matrix."""
+    """Convert 6-DoF action [x, y, z, roll, pitch, yaw] to a 4x4 matrix."""
     translation = action_6dof[..., :3]
     rpy = action_6dof[..., 3:]
 
-    # Create 4x4 matrix and set rotation and translation
     mat4x4 = torch.eye(4, device=action_6dof.device, dtype=action_6dof.dtype)
     mat4x4 = mat4x4.repeat(*action_6dof.shape[:-1], 1, 1)
     mat4x4[..., :3, :3] = roma.euler_to_rotmat("XYZ", rpy)
     mat4x4[..., :3, 3] = translation
+
     return mat4x4
 
 
 def transform_spheres(
-    spheres: Float[torch.Tensor, "num_spheres 4"], transform: Float[torch.Tensor, "*b 4 4"]
+    spheres: Float[torch.Tensor, "num_spheres 4"],
+    transform: Float[torch.Tensor, "*b 4 4"],
 ) -> Float[torch.Tensor, "*b num_spheres 4"]:
-    """Transform spheres by the given transformation matrices"""
+    """Transform object-frame spheres by 4x4 transforms."""
     centers = spheres[:, :3]
     centers_hom = torch.cat([centers, torch.ones_like(centers[:, :1])], dim=1)
     radii = spheres[:, 3]
 
-    # Add a dimension to broadcast over num_spheres
     if transform.ndim > 2:
-        # (*b, 4, 4) -> (*b, 1, 4, 4)
         transform = transform.unsqueeze(-3)
 
     out_spheres = einsum(transform, centers_hom, "... i j, ... j -> ... i")
     out_spheres[..., 3] = radii
+
     return out_spheres.contiguous()
 
 
 def transform_points(
-    points: Float[torch.Tensor, "num_points 3"], transform: Float[torch.Tensor, "*b 4 4"]
+    points: Float[torch.Tensor, "num_points 3"],
+    transform: Float[torch.Tensor, "*b 4 4"],
 ) -> Float[torch.Tensor, "*b num_points 3"]:
-    """Transform points by the given transformation matrices"""
+    """Transform object-frame points by 4x4 transforms."""
     points_hom = torch.cat([points, torch.ones_like(points[:, :1])], dim=1)
 
-    # Add a dimension to broadcast over num_points
     if transform.ndim > 2:
-        # (*b, 4, 4) -> (*b, 1, 4, 4)
         transform = transform.unsqueeze(-3)
 
     out_points_hom = einsum(transform, points_hom, "... i j, ... j -> ... i")
-    out_points = out_points_hom[..., :3]
-    return out_points
+    return out_points_hom[..., :3]
 
 
 def sample_between_bounds(num_samples: int, bounds: Float[torch.Tensor, "2 d"]) -> Float[torch.Tensor, "num_samples d"]:
-    """
-    Sample uniformly between bounds.
-    The bounds should be a (2, d) tensor where the first row is the lower bound and the second row is the upper bound.
-    """
+    """Sample uniformly between lower and upper joint limits."""
     lower, upper = bounds
     samples = torch.rand(num_samples, *lower.shape, device=bounds.device, dtype=bounds.dtype)
-    samples = lower + samples * (upper - lower)
-    return samples
+    return lower + samples * (upper - lower)
 
 
 def approximate_goal_aabb(goal: Obstacle) -> Float[torch.Tensor, "2 3"]:
-    """Approximate the goal AABB from the goal object."""
-    # Compute transformation matrix for object pose
-    pose = torch.tensor(goal.pose)
-    pos, wxyz = pose[:3], pose[3:]
-    xyzw = roma.quat_wxyz_to_xyzw(wxyz)
-    mat4x4 = torch.eye(4)
-    mat4x4[:3, :3] = roma.unitquat_to_rotmat(xyzw)
-    mat4x4[:3, 3] = pos
-    if isinstance(goal, MultiSphere):
-        goal = goal.get_mesh()
+    """Approximate an obstacle AABB in world coordinates."""
+    pose = torch.as_tensor(goal.pose, dtype=torch.float32)
+    pos = pose[:3]
+    quat_xyzw = roma.quat_wxyz_to_xyzw(pose[3:])
 
-    if isinstance(goal, Mesh):
-        vertices = torch.tensor(goal.vertices, dtype=mat4x4.dtype)
-        vertices = transform_points(vertices, mat4x4)
-        lower = vertices.min(dim=0).values
-        upper = vertices.max(dim=0).values
-        aabb = torch.stack([lower, upper])
-    elif isinstance(goal, Cuboid):
-        half_extents = torch.tensor(goal.dims, dtype=mat4x4.dtype) / 2
+    mat4x4 = torch.eye(4, dtype=pose.dtype)
+    mat4x4[:3, :3] = roma.unitquat_to_rotmat(quat_xyzw)
+    mat4x4[:3, 3] = pos
+
+    if isinstance(goal, MultiSphere):
+        goal = goal.get_mesh(process=False)
+
+    if isinstance(goal, Cuboid):
+        half_extents = torch.as_tensor(goal.dims, dtype=mat4x4.dtype) / 2
         center = mat4x4[:3, 3]
         world_half_extents = torch.abs(mat4x4[:3, :3]) @ half_extents
-        aabb = torch.stack([center - world_half_extents, center + world_half_extents])
-    else:
-        raise NotImplementedError(f"Goal type {type(goal)} not supported yet.")
+        return torch.stack([center - world_half_extents, center + world_half_extents])
 
-    return aabb
+    if isinstance(goal, Mesh):
+        vertices = torch.as_tensor(goal.vertices, dtype=mat4x4.dtype)
+        vertices = transform_points(vertices, mat4x4)
+        return torch.stack([vertices.min(dim=0).values, vertices.max(dim=0).values])
+
+    if isinstance(goal, (Sphere, Cylinder, Capsule)):
+        mesh = goal.get_mesh(process=False)
+        vertices = torch.as_tensor(mesh.vertices, dtype=mat4x4.dtype)
+        vertices = transform_points(vertices, mat4x4)
+        return torch.stack([vertices.min(dim=0).values, vertices.max(dim=0).values])
+
+    raise NotImplementedError(f"Goal type {type(goal)} not supported yet.")
 
 
 def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> Scene:
-    """Get the cuRobo scene description from the TAMP environment."""
+    """Build a cuRobo-v2-facing Scene from a TAMPEnvironment.
 
-    from cutamp.utils.obb import get_object_obb
+    cuRobo's collision loaders should receive only supported canonical scene
+    objects. MultiSphere is a cuTAMP internal shape and is converted to Mesh.
+    Sphere, Cylinder, and Capsule are also converted to Mesh to avoid failures
+    in collision backends that only accept Cuboid and Mesh.
+    """
 
     geoms = defaultdict(list)
-    # Copy lists to avoid mutating env.movables when appending statics.
     obstacles = list(env.movables) if include_movables else []
     obstacles += list(env.statics)
+
     for obj in obstacles:
         if isinstance(obj, Cuboid):
             geoms["cuboid"].append(obj)
@@ -174,36 +158,12 @@ def get_world_cfg(env: TAMPEnvironment, include_movables: bool = False) -> Scene
             geoms["cylinder"].append(obj)
         elif isinstance(obj, Capsule):
             geoms["capsule"].append(obj)
-        elif isinstance(obj, MultiSphere):
-            # curobo does not accept MultiSphere directly in Scene; convert it to Mesh.
+        elif isinstance(obj, (MultiSphere, Mesh)):
+            # Need to use mesh for MultiSphere
             geoms["mesh"].append(obj.get_mesh(process=False))
-        elif isinstance(obj, Mesh):
-            geoms["mesh"].append(obj)
         else:
             raise ValueError(f"Unknown object type: {type(obj)}")
+
     world_cfg = Scene(**geoms)
-
-    # IMPORTANT! We monkey patch the get_cuboid on mesh because cuRobo's implementation is super wacky.
-    # This makes it an issue when motion planning as the default OBBs can be significant over-approximations.
-    for mesh in world_cfg.mesh:
-        mesh_obb = get_object_obb(mesh)
-        xyz = mesh_obb.center.tolist()
-        quat_wxyz = mesh_obb.quat_wxyz.tolist()
-        pose = [*xyz, *quat_wxyz]
-        dims = (mesh_obb.half_extents * 2).tolist()
-
-        cuboid = Cuboid(
-            name=mesh.name,
-            pose=pose,
-            dims=dims,
-            color=mesh.color,
-            texture=mesh.texture,
-            material=mesh.material,
-            device_cfg=mesh.device_cfg,
-        )
-
-        # Monkey patch: replace get_cuboid to return our custom cuboid
-        mesh.get_cuboid = lambda c=cuboid: c
-        _log.debug(f"Monkey patched get_cuboid on mesh {mesh.name}")
 
     return world_cfg

@@ -8,7 +8,6 @@
 # its affiliates is strictly prohibited.
 from __future__ import annotations
 
-import copy
 import itertools
 import logging
 from functools import cached_property
@@ -38,19 +37,6 @@ from cutamp.utils.common import (
 from cutamp.utils.shapes import sample_greedy_surface_spheres
 
 _log = logging.getLogger(__name__)
-
-
-class _PlanResult(dict):
-    """Wrapper that supports both dict-like and attribute access for motion planning results."""
-    def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(f"'_PlanResult' object has no attribute '{key}'")
-    
-    def __setattr__(self, key, value):
-        self[key] = value
-
 
 
 class TAMPWorld:
@@ -94,11 +80,9 @@ class TAMPWorld:
             )
             self._obj_to_spheres[obj.name] = spheres.to(self.device)
 
-        self.static_scene = get_world_cfg(env, include_movables=False)
-        self.scene = get_world_cfg(env, include_movables=True)
-
+        self.world_cfg = get_world_cfg(env, include_movables=True)
         self.collision_fn = get_world_collision_cost(
-            self.static_scene,
+            self.world_cfg,
             self.device_cfg,
             self.collision_activation_distance,
         )
@@ -144,6 +128,10 @@ class TAMPWorld:
     @property
     def joint_names(self) -> list[str]:
         return list(self.robot_container.joint_names)
+
+    @property
+    def planning_joint_names(self) -> list[str]:
+        return list(self.motion_planner.joint_names)
 
     @property
     def initial_state(self) -> State:
@@ -239,23 +227,8 @@ class TAMPWorld:
     def warmup_motion_gen(self):
         self.motion_planner.warmup(enable_graph=True)
 
-    def robot_cfg_with_attachment_capacity(self) -> dict:
-        robot_cfg = copy.deepcopy(self.robot_container.robot_cfg)
-
-        kinematics_cfg = robot_cfg.setdefault("robot_cfg", {}).setdefault("kinematics", {})
-        extra_collision_spheres = kinematics_cfg.setdefault("extra_collision_spheres", {})
-
-        if self._obj_to_spheres:
-            extra_collision_spheres["attached_object"] = max(
-                len(spheres) for spheres in self._obj_to_spheres.values()
-            )
-        else:
-            extra_collision_spheres["attached_object"] = 0
-
-        return robot_cfg
-
     def collision_cache(self) -> dict:
-        num_meshes = len(getattr(self.scene, "mesh", ()) or ())
+        num_meshes = len(self.world_cfg.mesh)
         num_obstacles = len(self.movables) + len(self.statics)
 
         return {
@@ -267,8 +240,8 @@ class TAMPWorld:
         cache = self.collision_cache()
 
         checker_cfg = RobotCollisionCheckerCfg.load_from_config(
-            robot_config=self.robot_cfg_with_attachment_capacity(),
-            scene_model=self.scene,
+            robot_config=self.robot_container.robot_cfg,
+            scene_model=self.world_cfg,
             device_cfg=self.device_cfg,
             collision_activation_distance=self.collision_activation_distance,
             n_meshes=cache["mesh"],
@@ -278,8 +251,8 @@ class TAMPWorld:
 
     def create_ik_solver(self, num_seeds: int = 12) -> InverseKinematics:
         ik_cfg = InverseKinematicsCfg.create(
-            robot=self.robot_cfg_with_attachment_capacity(),
-            scene_model=self.scene,
+            robot=self.robot_container.robot_cfg,
+            scene_model=self.world_cfg,
             device_cfg=self.device_cfg,
             num_seeds=num_seeds,
             max_batch_size=self.ik_solver_batch_size,
@@ -292,8 +265,8 @@ class TAMPWorld:
 
     def create_motion_planner(self) -> MotionPlanner:
         motion_cfg = MotionPlannerCfg.create(
-            robot=self.robot_cfg_with_attachment_capacity(),
-            scene_model=self.scene,
+            robot=self.robot_container.robot_cfg,
+            scene_model=self.world_cfg,
             device_cfg=self.device_cfg,
             collision_cache=self.collision_cache(),
             use_cuda_graph=self.use_cuda_graph,
@@ -306,9 +279,8 @@ class TAMPWorld:
         return MotionPlanner(motion_cfg)
 
     def goal_tool_pose(self, desired_world_from_ee: torch.Tensor) -> GoalToolPose:
-        desired_world_from_tool = desired_world_from_ee @ self.tool_from_ee
         desired_pose = Pose.from_matrix(
-            desired_world_from_tool.to(
+            desired_world_from_ee.to(
                 device=self.device_cfg.device,
                 dtype=self.device_cfg.dtype,
             )
@@ -348,27 +320,12 @@ class TAMPWorld:
         }
         self.motion_planner.update_tool_pose_criteria(criteria)
 
-    @staticmethod
-    def _plan_result_success(result: object | None) -> bool:
-        success = getattr(result, "success", None)
-        if isinstance(success, bool):
-            return success
-        if isinstance(success, torch.Tensor):
-            return bool(success.any().item())
-        return False
-
-    @staticmethod
-    def _plan_result_failure(status: str = "planning_failed") -> _PlanResult:
-        return _PlanResult({"success": False, "status": status})
-
-
     def plan_pose(
         self,
         start_js: JointState,
         desired_world_from_ee: torch.Tensor,
         *,
         linear_axis: str | None = None,
-        allow_detached_retry: bool = False,
         max_attempts: int = 5,
         enable_graph_attempt: int = 1,
     ):
@@ -385,33 +342,6 @@ class TAMPWorld:
         finally:
             self.set_linear_motion_criteria(None)
 
-        if result is None:
-            result = self._plan_result_failure()
-
-        if self._plan_result_success(result) or not allow_detached_retry:
-            return result
-
-        object_name = self._attached_object_name
-        joint_state = self._attached_joint_state
-        self.detach_attached_object()
-
-        self.set_linear_motion_criteria(linear_axis)
-        try:
-            result = self.motion_planner.plan_pose(
-                self.goal_tool_pose(desired_world_from_ee),
-                start_js,
-                max_attempts=max_attempts,
-                enable_graph_attempt=enable_graph_attempt,
-            )
-        finally:
-            self.set_linear_motion_criteria(None)
-
-        if result is None:
-            result = self._plan_result_failure()
-
-        if object_name is not None and joint_state is not None:
-            self.attach_scene_object(joint_state, object_name)
-
         return result
 
     def plan_cspace(
@@ -419,7 +349,6 @@ class TAMPWorld:
         start_js: JointState,
         goal_js: JointState,
         *,
-        allow_detached_retry: bool = False,
         max_attempts: int = 5,
         enable_graph_attempt: int = 1,
     ):
@@ -433,29 +362,6 @@ class TAMPWorld:
             enable_graph_attempt=enable_graph_attempt,
         )
 
-        if result is None:
-            result = self._plan_result_failure()
-
-        if self._plan_result_success(result) or not allow_detached_retry:
-            return result
-
-        object_name = self._attached_object_name
-        joint_state = self._attached_joint_state
-        self.detach_attached_object()
-
-        result = self.motion_planner.plan_cspace(
-            goal_js,
-            start_js,
-            max_attempts=max_attempts,
-            enable_graph_attempt=enable_graph_attempt,
-        )
-
-        if result is None:
-            result = self._plan_result_failure()
-
-        if object_name is not None and joint_state is not None:
-            self.attach_scene_object(joint_state, object_name)
-
         return result
 
     def update_world(self, scene: Scene):
@@ -464,10 +370,10 @@ class TAMPWorld:
         The scene must already be canonicalized by get_world_cfg().
         MultiSphere or other cuTAMP-only objects must not be included here.
         """
-        self.scene = scene.clone()
-        self.motion_planner.update_world(self.scene)
-        self.ik_solver.update_world(self.scene)
-        self.robot_collision_checker.update_world(self.scene)
+        self.world_cfg = scene.clone()
+        self.motion_planner.update_world(self.world_cfg)
+        self.ik_solver.update_world(self.world_cfg)
+        self.robot_collision_checker.update_world(self.world_cfg)
 
     def reset_scene(self, obj_to_pose: dict[str, torch.Tensor]):
         """Rebuild the canonical cuRobo planning scene and set object poses."""
@@ -478,12 +384,10 @@ class TAMPWorld:
             if obstacle is not None:
                 obstacle.pose = Pose.from_matrix(obj_pose).tolist()
 
-        self._attached_object_name = None
-        self._attached_joint_state = None
         self.update_world(scene)
 
     def update_object_pose(self, obj_name: str, obj_pose: torch.Tensor):
-        scene = self.scene.clone()
+        scene = self.world_cfg.clone()
         obstacle = scene.get_obstacle(obj_name)
 
         if obstacle is None:
@@ -491,14 +395,6 @@ class TAMPWorld:
 
         obstacle.pose = Pose.from_matrix(obj_pose).tolist()
         self.update_world(scene)
-
-    def attach_scene_object(self, joint_state: JointState, object_name: str):
-        self._attached_object_name = object_name
-        self._attached_joint_state = self.ensure_joint_state(joint_state).clone()
-
-    def detach_attached_object(self, enable_obstacle_names: list[str] | None = None):
-        self._attached_object_name = None
-        self._attached_joint_state = None
 
 
 def check_tamp_world_not_in_collision(

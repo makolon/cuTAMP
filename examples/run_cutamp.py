@@ -165,7 +165,7 @@ def entrypoint():
         ],
     )
     parser.add_argument(
-        "-n", "--num_particles", type=int, default=512, help="Number of particles to use (i.e. batch size)"
+        "-n", "--num_particles", type=int, default=2000, help="Number of particles to use (i.e. batch size)"
     )
 
     # Soft costs

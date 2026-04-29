@@ -39,8 +39,6 @@ class TAMPConfiguration:
 
     # Optimization hyperparams
     num_opt_steps: int = 1_000
-    # cuRobo v2 collision and FK gradients are sharper than the upstream v1 stack.
-    # Keep the first Adam step below the kinematic tolerances so q/action pairs do not immediately diverge.
     lr: float = 1e-4  # default LR for optimizer
     conf_lr: float = 1e-5  # LR for robot configurations
 
