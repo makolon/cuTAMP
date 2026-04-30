@@ -218,7 +218,7 @@ class ParticleInitializer:
                     tool_frames=list(world.ik_solver.kinematics.tool_frames),
                     device=world.device_cfg.device,
                     dtype=world.device_cfg.dtype,
-                ),
+                )
                 ik_result = world.ik_solver.solve_pose(
                     goal_tool_poses=goal_tool_poses,
                     return_seeds=1,
