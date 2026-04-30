@@ -97,6 +97,7 @@ def load_demo_robot(robot_name: str) -> tuple[RobotContainer, torch.Tensor]:
             dtype=device_cfg.dtype,
         )
         tool_from_ee[:3, 3] = torch.tensor([0.0, 0.0, 0.105], device=device_cfg.device, dtype=device_cfg.dtype)
+
     robot = RobotContainer(
         name=robot_name,
         kinematics=kinematics,

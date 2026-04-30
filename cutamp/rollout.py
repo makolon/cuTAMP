@@ -12,6 +12,7 @@ from typing import List, Dict, TypedDict
 import torch
 from jaxtyping import Float
 
+from curobo.types import JointState
 from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
 from cutamp.config import TAMPConfiguration
 from cutamp.tamp_domain import MoveFree, MoveHolding, Pick, Place, Push, Conf
@@ -93,7 +94,9 @@ class RolloutFunction:
         with torch.profiler.record_function("rollout::forward_kinematics"):
             confs = torch.stack([particles[conf] for conf in self.conf_params], dim=1)
             confs_flat = confs.view(-1, confs.shape[-1])
-            robot_state = self.world.compute_kinematics(confs_flat)
+            robot_state = self.world.kinematics.compute_kinematics(
+                JointState.from_position(confs_flat)
+            )
 
             # Store ee pose as position + quaternion directly from cuRobo to avoid
             # the Pose -> matrix -> Pose round-trip in kinematic_costs.

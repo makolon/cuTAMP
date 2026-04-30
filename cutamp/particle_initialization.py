@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 from curobo.scene import Cuboid
-from curobo.types import Pose
+from curobo.types import Pose, GoalToolPose
 
 from cutamp.config import TAMPConfiguration
 from cutamp.costs import sphere_to_sphere_overlap
@@ -38,6 +38,29 @@ from cutamp.utils.common import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def pose_to_goal_tool_pose(
+    world_from_ee: torch.Tensor,
+    tool_frames: list[str],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> GoalToolPose:
+    """Convert a [batch, 4, 4] end-effector pose tensor to cuRobo v2 GoalToolPose.
+
+    cuRobo v2 InverseKinematics.solve_pose() expects GoalToolPose, not a raw
+    homogeneous transform tensor. The goal tensor must have shape:
+        position:   [batch, horizon, num_links, num_goalset, 3]
+        quaternion: [batch, horizon, num_links, num_goalset, 4]
+    """
+    world_from_ee = world_from_ee.to(device=device, dtype=dtype).contiguous()
+    ee_pose = Pose.from_matrix(world_from_ee)
+    pose_dict = {tool_frame: ee_pose for tool_frame in tool_frames}
+    return GoalToolPose.from_poses(
+        pose_dict,
+        ordered_tool_frames=tool_frames,
+        num_goalset=1,
+    )
 
 
 class ParticleInitializer:
@@ -189,9 +212,15 @@ class ParticleInitializer:
                 world_from_grasp = world_from_obj @ grasp_transforms
                 world_from_ee = world_from_grasp @ world.tool_from_ee
 
-                # Solve IK with cuRobo
-                ik_result = world.solve_pose(
+                # Solve IK with cuRobo v2
+                goal_tool_poses = pose_to_goal_tool_pose(
                     world_from_ee,
+                    tool_frames=list(world.ik_solver.kinematics.tool_frames),
+                    device=world.device_cfg.device,
+                    dtype=world.device_cfg.dtype,
+                ),
+                ik_result = world.ik_solver.solve_pose(
+                    goal_tool_poses=goal_tool_poses,
                     return_seeds=1,
                 )
                 success, q_next = ik_result.success, ik_result.solution
@@ -311,8 +340,14 @@ class ParticleInitializer:
                     world_from_grasp = world_from_obj @ obj_from_grasp
                     world_from_ee = world_from_grasp @ world.tool_from_ee
 
-                    ik_result = world.solve_pose(
+                    goal_tool_poses = pose_to_goal_tool_pose(
                         world_from_ee,
+                        tool_frames=list(world.ik_solver.kinematics.tool_frames),
+                        device=world.device_cfg.device,
+                        dtype=world.device_cfg.dtype,
+                    )
+                    ik_result = world.ik_solver.solve_pose(
+                        goal_tool_poses=goal_tool_poses,
                         return_seeds=1,
                     )
                     success, q_next = ik_result.success, ik_result.solution
@@ -384,9 +419,15 @@ class ParticleInitializer:
                 )
                 world_from_ee = world_from_push @ world.tool_from_ee
 
-                # Solve IK with cuRobo
-                ik_result = world.solve_pose(
+                # Solve IK with cuRobo v2
+                goal_tool_poses = pose_to_goal_tool_pose(
                     world_from_ee,
+                    tool_frames=list(world.ik_solver.kinematics.tool_frames),
+                    device=world.device_cfg.device,
+                    dtype=world.device_cfg.dtype,
+                )
+                ik_result = world.ik_solver.solve_pose(
+                    goal_tool_poses=goal_tool_poses,
                     return_seeds=1,
                 )
                 success, q_next = ik_result.success, ik_result.solution
