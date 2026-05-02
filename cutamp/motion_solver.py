@@ -80,6 +80,32 @@ def _segment_debug_payload(
     return payload
 
 
+def _visualizer_gripper_interp(
+    world: TAMPWorld,
+    config: TAMPConfiguration,
+    action: str,
+    like: torch.Tensor,
+    steps: int = 20,
+) -> torch.Tensor:
+    open_values = tuple(world.robot_container.visualizer_gripper_open)
+    closed_values = tuple(world.robot_container.visualizer_gripper_closed)
+    if not open_values or not closed_values:
+        if "ur5" in config.robot or "robotiq_2f_85" in config.robot:
+            open_values, closed_values = (0.0,), (0.4,)
+        open_values, closed_values = (0.04, 0.04), (0.02, 0.02)
+    if len(open_values) != len(closed_values):
+        raise ValueError(
+            f"Visualizer gripper limits for {world.robot_name} must have matching dimensions: "
+            f"open={open_values}, closed={closed_values}"
+        )
+
+    start_values, end_values = (open_values, closed_values) if action == "close" else (closed_values, open_values)
+    start = torch.as_tensor(start_values, dtype=like.dtype)
+    end = torch.as_tensor(end_values, dtype=like.dtype)
+    alpha = torch.linspace(0.0, 1.0, steps, dtype=like.dtype)[:, None]
+    return start + (end - start) * alpha
+
+
 def solve_curobo(
     plan_info: PlanContainer,
     best_particle: Particles,
@@ -269,38 +295,6 @@ def solve_curobo(
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
                 waypoint_index_offset += int(plan.position.shape[0])
 
-            # Temporarily monkey patch get_bounding_spheres to return the spheres we sampled
-            obstacle = motion_gen.world_model.get_obstacle(obj)
-            obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
-
-            def get_bounding_spheres(self, *args, **kwargs) -> List[Sphere]:
-                spheres = world.get_collision_spheres(obj)
-                pts = spheres[:, :3].cpu().numpy()
-                n_radius = spheres[:, 3].cpu().numpy()
-
-                obj_pose = Pose.from_matrix(obj_to_current_pose[obj])
-                pre_transform_pose = kwargs["pre_transform_pose"]
-                if pre_transform_pose is not None:
-                    obj_pose = pre_transform_pose.multiply(obj_pose)  # convert object pose to another frame
-
-                if pts is None or len(pts) == 0:
-                    raise ValueError("No points found from the spheres")
-
-                points_cuda = self.tensor_args.to_device(pts)
-                pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
-
-                new_spheres = [
-                    Sphere(
-                        name=f"{self.name}_sph_{i}",
-                        pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
-                        radius=n_radius[i],
-                    )
-                    for i in range(pts.shape[0])
-                ]
-                return new_spheres
-
-            obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
-
             # Attach the object to the robot
             with timer.time(f"{timeline}_planning"):
                 motion_gen.attach_objects_to_robot(
@@ -311,25 +305,13 @@ def solve_curobo(
                     voxelize_method="subdivide",
                 )
 
-            obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
-            del obstacle.old_get_bounding_spheres
-
-            # TODO: Fix this hardcoding
             # Close the gripper in the visualization
-            if "ur5" in config.robot or "robotiq_2f_85" in config.robot:
-                end_val = 0.4
-                interp = torch.linspace(0.0, end_val, 20)
-                interp = interp[:, None]
-            else:
-                end_val = 0.02
-                interp = torch.linspace(0.04, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+            interp = _visualizer_gripper_interp(world, config, "close", last_js.position)
             accum_plans.append({"type": "gripper", "action": "close", "label": ground_op.name})
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
         # Place
         elif op_name == Place.name:
@@ -484,40 +466,24 @@ def solve_curobo(
                 motion_gen.world_collision.update_obstacle_pose(obj, Pose.from_matrix(obj_pose))
 
             # Open the gripper for visualization purposes
-            if "ur5" in config.robot or "robotiq_2f_85" in config.robot:
-                end_val = 0.0
-                interp = torch.linspace(0.4, end_val, 20)
-                interp = interp[:, None]
-            else:
-                end_val = 0.04
-                interp = torch.linspace(0.02, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+            interp = _visualizer_gripper_interp(world, config, "open", last_js.position)
             accum_plans.append({"type": "gripper", "action": "open", "label": ground_op.name})
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
         # Push
         elif op_name == Push.name:
             button, pose, _ = ground_op.values
             assert last_js is not None
 
-            if "ur5" in config.robot or "robotiq_2f_85" in config.robot:
-                end_val = 0.4
-                interp = torch.linspace(0.0, end_val, 20)
-                interp = interp[:, None]
-            else:
-                end_val = 0.02
-                interp = torch.linspace(0.04, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+            interp = _visualizer_gripper_interp(world, config, "close", last_js.position)
             accum_plans.append({"type": "gripper", "action": "close", "label": ground_op.name})
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
             with timer.time(f"{timeline}_planning"):
                 start_js = last_js
