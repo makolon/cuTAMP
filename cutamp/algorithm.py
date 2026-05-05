@@ -316,6 +316,8 @@ def setup_cutamp(
         else MockVisualizer()
     )
     if config.enable_visualizer:
+        if config.rr_init and exp_logger is not None and isinstance(visualizer, RerunVisualizer):
+            visualizer.save(exp_logger.exp_dir / "rerun.rrd")
         visualizer.log_tamp_world(world)
     return exp_logger, visualizer, timer, world
 

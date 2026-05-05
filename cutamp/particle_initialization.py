@@ -237,8 +237,8 @@ class ParticleInitializer:
                     continue
 
                 place_stream_data = self.place_streams.get(obj)
-                stream_data = place_stream_data.get(surface)
-                if stream_data is not None:
+                if place_stream_data is not None:
+                    stream_data = place_stream_data.get(surface)
                     placements_world = stream_data.get("placements_world")
                     support_scores_pt = stream_data.get("support_scores_pt")
 
