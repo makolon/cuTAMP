@@ -104,6 +104,15 @@ class TAMPConfiguration:
     # Whether to warmup motion generator
     warmup_motion_gen: bool = True
 
+    ## Motion Planning Space
+    # "joint" : cuRobo joint-space TrajOpt (default cuRobo behavior, can produce arcing motions).
+    # "ee"    : Cartesian-linear EE-space planning + batched IK (more direct/human-like motion).
+    motion_planning_space: Literal["joint", "ee"] = "joint"
+    # Number of intermediate waypoints generated for one EE-space segment (excluding endpoints).
+    ee_planning_num_waypoints: int = 30
+    # Target EE linear velocity (m/s) used to time-parametrize EE-space trajectories.
+    ee_planning_velocity: float = 0.25
+
     ## Visualizer Args
     # Whether to use visualizer, if set to False a Mock is used
     enable_visualizer: bool = True
@@ -181,4 +190,16 @@ def validate_tamp_config(config: TAMPConfiguration):
     if config.placement_check != "obb" and config.placement_shrink_dist is not None:
         raise NotImplementedError(
             f"placement_shrink_dist only supported with placement_check = obb, not {config.placement_check}"
+        )
+
+    # EE-space planning
+    if config.motion_planning_space not in {"joint", "ee"}:
+        raise ValueError(f"Invalid motion_planning_space: {config.motion_planning_space}")
+    if config.ee_planning_num_waypoints <= 1:
+        raise ValueError(
+            f"ee_planning_num_waypoints must be > 1, not {config.ee_planning_num_waypoints}"
+        )
+    if config.ee_planning_velocity <= 0.0:
+        raise ValueError(
+            f"ee_planning_velocity must be positive, not {config.ee_planning_velocity}"
         )
