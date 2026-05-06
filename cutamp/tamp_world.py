@@ -186,8 +186,25 @@ class TAMPWorld:
         """Warmup cuRobo motion generator."""
         self.motion_gen.warmup()
 
-    def get_ik_solver(self, num_seeds: int = 12, self_collision_opt: bool = False, self_collision_check: bool = True, use_particle_opt: bool = False) -> IKSolver:
-        """Get the cuRobo IK solver for the robot."""
+    def get_ik_solver(
+        self,
+        num_seeds: int = 12,
+        self_collision_opt: bool = False,
+        self_collision_check: bool = True,
+        use_particle_opt: bool = False,
+        use_cuda_graph: bool = False,
+    ) -> IKSolver:
+        """Get the cuRobo IK solver for the robot.
+
+        ``use_cuda_graph`` defaults to False because the cartesian planner calls
+        ``solve_single`` with ``retract_config``/``seed_config`` while warmup
+        calls ``solve_batch`` without them. cuRobo's CUDA graph captures the
+        first call's goal-buffer layout and rejects mismatched follow-ups
+        unless the runtime supports graph reset (which is unreliable across
+        torch/CUDA combinations). Disabling the graph avoids the
+        "changing goal type, cuda graph reset not available" error at the cost
+        of a few ms per IK call.
+        """
 
         # World config needs to include movables for cuRobo
         world_cfg = get_world_cfg(self.env, include_movables=True)
@@ -198,6 +215,7 @@ class TAMPWorld:
             self_collision_opt=self_collision_opt,
             self_collision_check=self_collision_check,
             use_particle_opt=use_particle_opt,
+            use_cuda_graph=use_cuda_graph,
         )
         return IKSolver(ik_config)
 

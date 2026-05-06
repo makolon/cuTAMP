@@ -356,7 +356,8 @@ def run_cutamp(
             explored_state_check=config.explored_state_check,
         )
 
-    # Sample initial plans and particles
+    min_fallback_satisfying = 5 if config.curobo_plan else 1
+    satisfying_skeleton_count = 0
     found_solution_initially = False
     num_skipped_plans = 0
     with timer.time("sample_initial_plans", log_callback=_log.info):
@@ -376,8 +377,10 @@ def run_cutamp(
                 break
             plan_queue.append(plan_info)
             if has_solution:
-                found_solution_initially = True
-                break
+                satisfying_skeleton_count += 1
+                if satisfying_skeleton_count >= min_fallback_satisfying:
+                    found_solution_initially = True
+                    break
             plan_count += 1
 
     # Sort plans by heuristic
