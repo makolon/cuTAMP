@@ -18,17 +18,18 @@ class TAMPConfiguration:
 
     # Robot embodiment to use
     robot: Literal[
-        "panda",
-        "fr3_robotiq",
-        "ur5",
-        "panda_robotiq",
-        "fr3_franka",
+        "franka_panda",
+        "franka_robotiq_2f_85",
+        "franka_robotiq_2f_140",
+        "ur5_robotiq_2f_85",
+        "ur5_robotiq_2f_140",
         "xarm7",
-    ] = "panda"
+    ] = "franka_panda"
 
     # Grasp and Placements
     grasp_dof: Literal[4, 6] = 4
-    place_dof: Literal[4] = 4
+    place_dof: Literal[4, 6] = 4
+    push_dof: Literal[4, 6] = 4
 
     # Approach to use. Note: optimization includes particle initialization (i.e., sampling)
     approach: Literal["optimization", "sampling"] = "optimization"
@@ -103,6 +104,15 @@ class TAMPConfiguration:
     # Whether to warmup motion generator
     warmup_motion_gen: bool = True
 
+    ## Motion Planning Space
+    # "joint" : cuRobo joint-space TrajOpt (default cuRobo behavior, can produce arcing motions).
+    # "ee"    : Cartesian-linear EE-space planning + batched IK (more direct/human-like motion).
+    motion_planning_space: Literal["joint", "ee"] = "joint"
+    # Number of intermediate waypoints generated for one EE-space segment (excluding endpoints).
+    ee_planning_num_waypoints: int = 30
+    # Target EE linear velocity (m/s) used to time-parametrize EE-space trajectories.
+    ee_planning_velocity: float = 0.25
+
     ## Visualizer Args
     # Whether to use visualizer, if set to False a Mock is used
     enable_visualizer: bool = True
@@ -112,22 +122,33 @@ class TAMPConfiguration:
     viz_robot_mesh: bool = True
     # Spawn the rerun visualizer
     rr_spawn: bool = True
+    # Initialize a fresh rerun recording inside cuTAMP. Set to False when the caller already did it.
+    rr_init: bool = True
 
     ## Logging Args
     enable_experiment_logging: bool = True
     # Root directory for logging experiments
-    experiment_root: str = "/tmp/cutamp-experiments"
+    experiment_root: str = "cutamp-experiments"
 
 
 def validate_tamp_config(config: TAMPConfiguration):
     if config.num_particles <= 0:
         raise ValueError(f"num_particles must be positive, not {config.num_particles}")
-    if config.robot not in {"panda", "fr3_robotiq", "ur5", "panda_robotiq", "fr3_franka", "xarm7"}:
+    if config.robot not in {
+        "franka_panda",
+        "franka_robotiq_2f_85",
+        "franka_robotiq_2f_140",
+        "ur5_robotiq_2f_85",
+        "ur5_robotiq_2f_140",
+        "xarm7",
+    }:
         raise ValueError(f"Invalid embodiment: {config.robot}")
     if config.grasp_dof not in {4, 6}:
         raise ValueError(f"Invalid grasp_dof: {config.grasp_dof}")
-    if config.place_dof not in {4}:
+    if config.place_dof not in {4, 6}:
         raise ValueError(f"Invalid place_dof: {config.place_dof}")
+    if config.push_dof not in {4, 6}:
+        raise ValueError(f"Invalid push_dof: {config.push_dof}")
     if config.approach not in {"optimization", "sampling"}:
         raise ValueError(f"Invalid approach: {config.approach}")
     if config.num_resampling_attempts < 0:
@@ -169,4 +190,16 @@ def validate_tamp_config(config: TAMPConfiguration):
     if config.placement_check != "obb" and config.placement_shrink_dist is not None:
         raise NotImplementedError(
             f"placement_shrink_dist only supported with placement_check = obb, not {config.placement_check}"
+        )
+
+    # EE-space planning
+    if config.motion_planning_space not in {"joint", "ee"}:
+        raise ValueError(f"Invalid motion_planning_space: {config.motion_planning_space}")
+    if config.ee_planning_num_waypoints <= 1:
+        raise ValueError(
+            f"ee_planning_num_waypoints must be > 1, not {config.ee_planning_num_waypoints}"
+        )
+    if config.ee_planning_velocity <= 0.0:
+        raise ValueError(
+            f"ee_planning_velocity must be positive, not {config.ee_planning_velocity}"
         )

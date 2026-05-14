@@ -10,7 +10,7 @@
 """Solving motions with cuRobo."""
 
 import logging
-from typing import List, Optional
+from typing import List
 
 import torch
 
@@ -19,10 +19,11 @@ from curobo.geom.types import Sphere
 from curobo.rollout.cost.pose_cost import PoseCostMetric
 from curobo.types.math import Pose
 from curobo.types.state import JointState
-from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig, MotionGen
+from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig, MotionGenResult
+from cutamp.cartesian_planner import plan_cartesian_linear
 from cutamp.config import TAMPConfiguration
 from cutamp.optimize_plan import PlanContainer
-from cutamp.tamp_domain import MoveHolding, Push, PushStick, MoveFree, Place, Pick
+from cutamp.tamp_domain import MoveHolding, Push, MoveFree, Place, Pick
 from cutamp.tamp_world import TAMPWorld
 from cutamp.utils.common import Particles, action_6dof_to_mat4x4, action_4dof_to_mat4x4
 from cutamp.utils.timer import TorchTimer
@@ -31,8 +32,100 @@ from cutamp.utils.visualizer import Visualizer
 _log = logging.getLogger(__name__)
 
 
-class MotionPlanningError(RuntimeError):
-    pass
+def _plan_to_pose(
+    *,
+    world: TAMPWorld,
+    config: TAMPConfiguration,
+    start_js: JointState,
+    world_from_goal_ee: torch.Tensor,
+    motion_gen,
+    plan_config: MotionGenPlanConfig,
+) -> MotionGenResult:
+    """Plan from ``start_js`` to a goal EE pose, dispatching on ``motion_planning_space``."""
+
+    if config.motion_planning_space == "ee":
+        return plan_cartesian_linear(
+            start_js=start_js,
+            world_from_goal_ee=world_from_goal_ee,
+            world=world,
+            config=config,
+        )
+    return motion_gen.plan_single(start_js, Pose.from_matrix(world_from_goal_ee), plan_config)
+
+
+def _mat4_to_list(mat4: torch.Tensor) -> list[list[float]]:
+    mat = mat4.detach().cpu().float().view(4, 4)
+    return [[float(value) for value in row] for row in mat.tolist()]
+
+
+def _pose_error(actual: torch.Tensor, desired: torch.Tensor) -> tuple[float, float]:
+    actual_mat = actual.detach().cpu().float().view(4, 4)
+    desired_mat = desired.detach().cpu().float().view(4, 4)
+    translation_error = float(torch.linalg.norm(actual_mat[:3, 3] - desired_mat[:3, 3]).item())
+    delta = actual_mat[:3, :3] @ desired_mat[:3, :3].T
+    trace = float(torch.trace(delta).item())
+    cos_theta = max(-1.0, min(1.0, 0.5 * (trace - 1.0)))
+    rotation_error = float(torch.rad2deg(torch.arccos(torch.tensor(cos_theta))).item())
+    return translation_error, rotation_error
+
+
+def _segment_debug_payload(
+    *,
+    label: str,
+    segment_type: str,
+    desired_world_from_ee: torch.Tensor,
+    terminal_world_from_ee: torch.Tensor,
+    plan_positions: torch.Tensor | None = None,
+    waypoint_index_offset: int = 0,
+    selected_parameter_name: str | None = None,
+    selected_obj_from_grasp: torch.Tensor | None = None,
+    object_name: str | None = None,
+) -> dict[str, object]:
+    translation_error, rotation_error = _pose_error(terminal_world_from_ee, desired_world_from_ee)
+    payload: dict[str, object] = {
+        "label": str(label),
+        "segment_type": str(segment_type),
+        "desired_world_from_ee": _mat4_to_list(desired_world_from_ee),
+        "terminal_world_from_fk": _mat4_to_list(terminal_world_from_ee),
+        "terminal_translation_error_m": float(translation_error),
+        "terminal_rotation_error_deg": float(rotation_error),
+        "waypoint_index_offset": int(waypoint_index_offset),
+    }
+    if plan_positions is not None:
+        payload["num_waypoints"] = int(plan_positions.shape[0])
+    if selected_parameter_name:
+        payload["selected_parameter_name"] = str(selected_parameter_name)
+    if selected_obj_from_grasp is not None:
+        payload["selected_obj_from_grasp"] = _mat4_to_list(selected_obj_from_grasp)
+    if object_name:
+        payload["object_name"] = str(object_name)
+    return payload
+
+
+def _visualizer_gripper_interp(
+    world: TAMPWorld,
+    config: TAMPConfiguration,
+    action: str,
+    like: torch.Tensor,
+    steps: int = 20,
+) -> torch.Tensor:
+    open_values = tuple(world.robot_container.visualizer_gripper_open)
+    closed_values = tuple(world.robot_container.visualizer_gripper_closed)
+    if not open_values or not closed_values:
+        if "ur5" in config.robot or "robotiq_2f_85" in config.robot:
+            open_values, closed_values = (0.0,), (0.4,)
+        open_values, closed_values = (0.04, 0.04), (0.02, 0.02)
+    if len(open_values) != len(closed_values):
+        raise ValueError(
+            f"Visualizer gripper limits for {world.robot_name} must have matching dimensions: "
+            f"open={open_values}, closed={closed_values}"
+        )
+
+    start_values, end_values = (open_values, closed_values) if action == "close" else (closed_values, open_values)
+    start = torch.as_tensor(start_values, dtype=like.dtype)
+    end = torch.as_tensor(end_values, dtype=like.dtype)
+    alpha = torch.linspace(0.0, 1.0, steps, dtype=like.dtype)[:, None]
+    return start + (end - start) * alpha
 
 
 def solve_curobo(
@@ -50,10 +143,10 @@ def solve_curobo(
     Note that visualization adds non-trivial overhead.
     """
     plan_skeleton = plan_info["plan_skeleton"]
-    motion_gen = world.get_motion_gen(collision_activation_distance=config.world_activation_distance)
+    motion_gen = world.motion_gen
     if config.warmup_motion_gen:
         with timer.time(f"{timeline}_motion_gen_warmup", log_callback=_log.debug):
-            motion_gen.warmup()
+            world.warmup_motion_gen()
 
     plan_config = MotionGenPlanConfig(
         timeout=0.25, enable_finetune_trajopt=False, time_dilation_factor=config.time_dilation_factor
@@ -62,7 +155,6 @@ def solve_curobo(
     # Log initial state
     ts = 0.0
     obj_to_current_pose = {k: v.clone() for k, v in obj_to_initial_pose.items()}
-    # obj_to_current_pose = {obj.name: world.get_object_pose(obj) for obj in world.movables}
 
     # Reset motion gen, clear attachments and reset pose of all objects
     motion_gen.detach_object_from_robot("attached_object")
@@ -96,6 +188,7 @@ def solve_curobo(
 
     # Accumulated plans we return that the real robot can actually execute
     accum_plans = []
+    waypoint_index_offset = 0
 
     # Iterate through skeleton and motion plan
     for idx, ground_op in enumerate(plan_skeleton):
@@ -124,16 +217,22 @@ def solve_curobo(
 
             with timer.time(f"{timeline}_planning"):
                 start_js = last_js
+                world_from_start_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                world_from_retract = world_from_start_ee
 
                 # Get the retract pose and plan to it if it's not q0
                 if last_q_name != "q0":
-                    world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
-                    world_from_retract = world_from_ee @ approach_offset
-                    retract_result = motion_gen.plan_single(
-                        start_js, Pose.from_matrix(world_from_retract), constrained_plan_config
+                    world_from_retract = world_from_start_ee @ approach_offset
+                    retract_result = _plan_to_pose(
+                        world=world,
+                        config=config,
+                        start_js=start_js,
+                        world_from_goal_ee=world_from_retract,
+                        motion_gen=motion_gen,
+                        plan_config=constrained_plan_config,
                     )
                     if not retract_result.success:
-                        raise MotionPlanningError(
+                        raise RuntimeError(
                             f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
                         )
                     retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
@@ -153,27 +252,73 @@ def solve_curobo(
                 world_from_ee = world_from_grasp @ world.tool_from_ee
 
                 world_from_approach = world_from_ee @ approach_offset
-                approach_result = motion_gen.plan_single(retract_js, Pose.from_matrix(world_from_approach), plan_config)
+                approach_result = _plan_to_pose(
+                    world=world,
+                    config=config,
+                    start_js=retract_js,
+                    world_from_goal_ee=world_from_approach,
+                    motion_gen=motion_gen,
+                    plan_config=plan_config,
+                )
                 if not approach_result.success:
-                    raise MotionPlanningError(
+                    raise RuntimeError(
                         f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
                     )
 
                 # Plan to from approach to target EE pose for grasp
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(
-                    approach_js, Pose.from_matrix(world_from_ee), constrained_plan_config
+                end_result = _plan_to_pose(
+                    world=world,
+                    config=config,
+                    start_js=approach_js,
+                    world_from_goal_ee=world_from_ee,
+                    motion_gen=motion_gen,
+                    plan_config=constrained_plan_config,
                 )
                 if not end_result.success:
-                    raise MotionPlanningError(
+                    raise RuntimeError(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
                     )
 
-            for result in [retract_result, approach_result, end_result]:
+            ik_fk = world.kin_model.get_state(best_particle[q][None]).ee_pose.get_matrix()[0]
+            ik_translation_error, ik_rotation_error = _pose_error(ik_fk, world_from_ee)
+            ik_debug = {
+                "label": ground_op.name,
+                "segment_type": "ik_pick",
+                "selected_parameter_name": str(grasp),
+                "object_name": str(obj),
+                "desired_world_from_ee": _mat4_to_list(world_from_ee),
+                "ik_world_from_fk": _mat4_to_list(ik_fk),
+                "translation_error_m": float(ik_translation_error),
+                "rotation_error_deg": float(ik_rotation_error),
+                "success": True,
+                "selected_obj_from_grasp": _mat4_to_list(obj_from_grasp),
+            }
+
+            segment_specs = [
+                ("pick_retract", retract_result, world_from_retract),
+                ("pick_approach", approach_result, world_from_approach),
+                ("pick_grasp", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
                 if result is None:
                     continue
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
+                debug_payload = _segment_debug_payload(
+                    label=ground_op.name,
+                    segment_type=segment_type,
+                    desired_world_from_ee=desired_world_from_ee,
+                    terminal_world_from_ee=terminal_world_from_fk,
+                    plan_positions=plan.position,
+                    waypoint_index_offset=waypoint_index_offset,
+                    selected_parameter_name=str(grasp),
+                    selected_obj_from_grasp=obj_from_grasp,
+                    object_name=str(obj),
+                )
+                if segment_type == "pick_retract":
+                    debug_payload["ik_debug"] = ik_debug
                 accum_plans.append(
                     {
                         "type": "trajectory",
@@ -182,42 +327,12 @@ def solve_curobo(
                         "optimized_plan": result.optimized_plan,
                         "optimized_dt": result.optimized_dt,
                         "label": ground_op.name,
+                        "debug": debug_payload,
                     }
                 )
                 last_js = JointState.from_position(plan[-1:].position)
                 ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
-
-            # Temporarily monkey patch get_bounding_spheres to return the spheres we sampled
-            obstacle = motion_gen.world_model.get_obstacle(obj)
-            obstacle.old_get_bounding_spheres = obstacle.get_bounding_spheres
-
-            def get_bounding_spheres(self, *args, **kwargs) -> List[Sphere]:
-                spheres = world.get_collision_spheres(obj)
-                pts = spheres[:, :3].cpu().numpy()
-                n_radius = spheres[:, 3].cpu().numpy()
-
-                obj_pose = Pose.from_matrix(obj_to_current_pose[obj])
-                pre_transform_pose = kwargs["pre_transform_pose"]
-                if pre_transform_pose is not None:
-                    obj_pose = pre_transform_pose.multiply(obj_pose)  # convert object pose to another frame
-
-                if pts is None or len(pts) == 0:
-                    raise ValueError("No points found from the spheres")
-
-                points_cuda = self.tensor_args.to_device(pts)
-                pts = obj_pose.transform_points(points_cuda).cpu().view(-1, 3).numpy()
-
-                new_spheres = [
-                    Sphere(
-                        name=f"{self.name}_sph_{i}",
-                        pose=[pts[i, 0], pts[i, 1], pts[i, 2], 1, 0, 0, 0],
-                        radius=n_radius[i],
-                    )
-                    for i in range(pts.shape[0])
-                ]
-                return new_spheres
-
-            obstacle.get_bounding_spheres = get_bounding_spheres.__get__(obstacle)
+                waypoint_index_offset += int(plan.position.shape[0])
 
             # Attach the object to the robot
             with timer.time(f"{timeline}_planning"):
@@ -229,24 +344,13 @@ def solve_curobo(
                     voxelize_method="subdivide",
                 )
 
-            obstacle.get_bounding_spheres = obstacle.old_get_bounding_spheres
-            del obstacle.old_get_bounding_spheres
-
             # Close the gripper in the visualization
-            if config.robot == "ur5" or config.robot == "fr3_robotiq":
-                end_val = 0.4
-                interp = torch.linspace(0.0, end_val, 20)
-                interp = interp[:, None]
-            else:
-                end_val = 0.02
-                interp = torch.linspace(0.04, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+            interp = _visualizer_gripper_interp(world, config, "close", last_js.position)
             accum_plans.append({"type": "gripper", "action": "close", "label": ground_op.name})
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
         # Place
         elif op_name == Place.name:
@@ -260,28 +364,38 @@ def solve_curobo(
                 world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
                 world_from_ee_start = world_from_ee
                 world_from_retract = world_from_ee @ approach_offset
-                retract_result = motion_gen.plan_single(
-                    start_js, Pose.from_matrix(world_from_retract), constrained_plan_config
+                retract_result = _plan_to_pose(
+                    world=world,
+                    config=config,
+                    start_js=start_js,
+                    world_from_goal_ee=world_from_retract,
+                    motion_gen=motion_gen,
+                    plan_config=constrained_plan_config,
                 )
                 if not retract_result.success:
                     if (
                         retract_result.status is not None
-                        and retract_result.status.name == "INVALID_START_STATE_WORLD_COLLISION"
+                        and getattr(retract_result.status, "name", None) == "INVALID_START_STATE_WORLD_COLLISION"
                     ):
                         kin_config = motion_gen.kinematics.kinematics_config
                         link_name = "attached_object"
                         curr_obj_sphs = kin_config.get_link_spheres(link_name).clone()
                         kin_config.detach_object(link_name)
-                        retract_result = motion_gen.plan_single(
-                            start_js, Pose.from_matrix(world_from_retract), plan_config
+                        retract_result = _plan_to_pose(
+                            world=world,
+                            config=config,
+                            start_js=start_js,
+                            world_from_goal_ee=world_from_retract,
+                            motion_gen=motion_gen,
+                            plan_config=plan_config,
                         )
                         kin_config.attach_object(sphere_tensor=curr_obj_sphs, link_name=link_name)
                         if not retract_result.success:
-                            raise MotionPlanningError(
+                            raise RuntimeError(
                                 f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
                             )
                     else:
-                        raise MotionPlanningError(
+                        raise RuntimeError(
                             f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
                         )
 
@@ -298,8 +412,13 @@ def solve_curobo(
                 world_from_ee = world_from_grasp @ world.tool_from_ee
                 world_from_approaches = world_from_ee @ approach_offsets
                 for app_idx, world_from_approach in enumerate(world_from_approaches):
-                    approach_result = motion_gen.plan_single(
-                        retract_js, Pose.from_matrix(world_from_approach), plan_config
+                    approach_result = _plan_to_pose(
+                        world=world,
+                        config=config,
+                        start_js=retract_js,
+                        world_from_goal_ee=world_from_approach,
+                        motion_gen=motion_gen,
+                        plan_config=plan_config,
                     )
                     _log.debug(
                         f"Approach attempt {app_idx + 1}/{len(world_from_approaches)}. {approach_result.success}"
@@ -308,27 +427,66 @@ def solve_curobo(
                         break
 
                 if not approach_result.success:
-                    raise MotionPlanningError(
+                    raise RuntimeError(
                         f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
                     )
 
                 # Plan from approach to end js
                 approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
-                end_result = motion_gen.plan_single(
-                    approach_js, Pose.from_matrix(world_from_ee), constrained_plan_config
+                end_result = _plan_to_pose(
+                    world=world,
+                    config=config,
+                    start_js=approach_js,
+                    world_from_goal_ee=world_from_ee,
+                    motion_gen=motion_gen,
+                    plan_config=constrained_plan_config,
                 )
                 if not end_result.success:
-                    raise MotionPlanningError(
+                    raise RuntimeError(
                         f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
                     )
+
+            ik_fk = world.kin_model.get_state(best_particle[q][None]).ee_pose.get_matrix()[0]
+            ik_translation_error, ik_rotation_error = _pose_error(ik_fk, world_from_ee)
+            ik_debug = {
+                "label": ground_op.name,
+                "segment_type": "ik_place",
+                "selected_parameter_name": str(grasp),
+                "object_name": str(obj),
+                "desired_world_from_ee": _mat4_to_list(world_from_ee),
+                "ik_world_from_fk": _mat4_to_list(ik_fk),
+                "translation_error_m": float(ik_translation_error),
+                "rotation_error_deg": float(ik_rotation_error),
+                "success": True,
+                "selected_obj_from_grasp": _mat4_to_list(obj_from_grasp),
+            }
 
             # Compute the offset between the object and end-effector at start of plan
             obj_from_ee = torch.inverse(obj_to_current_pose[obj]) @ world_from_ee_start
             ee_from_obj = torch.inverse(obj_from_ee)
 
-            for result in [retract_result, approach_result, end_result]:
+            segment_specs = [
+                ("place_retract", retract_result, world_from_retract),
+                ("place_approach", approach_result, world_from_approach),
+                ("place_place", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
                 dt = result.interpolation_dt
                 plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
+                debug_payload = _segment_debug_payload(
+                    label=ground_op.name,
+                    segment_type=segment_type,
+                    desired_world_from_ee=desired_world_from_ee,
+                    terminal_world_from_ee=terminal_world_from_fk,
+                    plan_positions=plan.position,
+                    waypoint_index_offset=waypoint_index_offset,
+                    selected_parameter_name=str(grasp),
+                    selected_obj_from_grasp=obj_from_grasp,
+                    object_name=str(obj),
+                )
+                if segment_type == "place_retract":
+                    debug_payload["ik_debug"] = ik_debug
                 accum_plans.append(
                     {
                         "type": "trajectory",
@@ -337,6 +495,7 @@ def solve_curobo(
                         "optimized_plan": result.optimized_plan,
                         "optimized_dt": result.optimized_dt,
                         "label": ground_op.name,
+                        "debug": debug_payload,
                     }
                 )
                 last_js = JointState.from_position(plan[-1:].position)
@@ -353,6 +512,7 @@ def solve_curobo(
                     start_time=ts,
                     dt=dt,
                 )
+                waypoint_index_offset += int(plan.position.shape[0])
 
                 # Updated pose is the last pose
                 obj_to_current_pose[obj] = world_from_obj[-1]
@@ -365,25 +525,121 @@ def solve_curobo(
                 motion_gen.world_collision.update_obstacle_pose(obj, Pose.from_matrix(obj_pose))
 
             # Open the gripper for visualization purposes
-            if config.robot == "ur5" or config.robot == "fr3_robotiq":
-                end_val = 0.0
-                interp = torch.linspace(0.4, end_val, 20)
-                interp = interp[:, None]
-            else:
-                end_val = 0.04
-                interp = torch.linspace(0.02, end_val, 20)[:, None]
-                interp = interp.repeat(1, 2)
-            dt = 0.02
+            interp = _visualizer_gripper_interp(world, config, "open", last_js.position)
             accum_plans.append({"type": "gripper", "action": "open", "label": ground_op.name})
 
             all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
             all_pos = torch.cat([all_pos, interp], dim=1)
-            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=dt)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
 
-        # Push and PushStick
-        elif op_name == Push.name or op_name == PushStick.name:
-            # TODO: implement motion solving for these operators
-            raise NotImplementedError("Push and PushStick operations are not yet supported in cuRobo motion planning.")
+        # Push
+        elif op_name == Push.name:
+            button, pose, _ = ground_op.values
+            assert last_js is not None
+
+            interp = _visualizer_gripper_interp(world, config, "close", last_js.position)
+            accum_plans.append({"type": "gripper", "action": "close", "label": ground_op.name})
+
+            all_pos = last_js.position.expand(interp.shape[0], -1).cpu()
+            all_pos = torch.cat([all_pos, interp], dim=1)
+            ts = visualizer.log_joint_trajectory(all_pos, timeline=timeline, start_time=ts, dt=0.02)
+
+            with timer.time(f"{timeline}_planning"):
+                start_js = last_js
+
+                if last_q_name != "q0":
+                    world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+                    world_from_retract = world_from_ee @ approach_offset
+                    retract_result = _plan_to_pose(
+                        world=world,
+                        config=config,
+                        start_js=start_js,
+                        world_from_goal_ee=world_from_retract,
+                        motion_gen=motion_gen,
+                        plan_config=constrained_plan_config,
+                    )
+                    if not retract_result.success:
+                        raise RuntimeError(
+                            f"Failed to plan for retract for {ground_op.name}. Status: {retract_result.status}"
+                        )
+                    retract_js = JointState.from_position(retract_result.get_interpolated_plan().position[-1:])
+                else:
+                    retract_result = None
+                    retract_js = start_js
+
+                if best_particle[pose].shape == (4, 4):
+                    world_from_push = best_particle[pose].clone()
+                elif config.push_dof == 4:
+                    world_from_push = action_4dof_to_mat4x4(best_particle[pose].clone())
+                else:
+                    world_from_push = action_6dof_to_mat4x4(best_particle[pose].clone())
+                world_from_ee = world_from_push @ world.tool_from_ee
+
+                world_from_approach = world_from_ee @ approach_offset
+                approach_result = _plan_to_pose(
+                    world=world,
+                    config=config,
+                    start_js=retract_js,
+                    world_from_goal_ee=world_from_approach,
+                    motion_gen=motion_gen,
+                    plan_config=plan_config,
+                )
+                if not approach_result.success:
+                    raise RuntimeError(
+                        f"Failed to plan for approach for {ground_op.name}. Status: {approach_result.status}"
+                    )
+
+                approach_js = JointState.from_position(approach_result.get_interpolated_plan().position[-1:])
+                motion_gen.world_coll_checker.enable_obstacle(enable=False, name=button)
+                try:
+                    end_result = _plan_to_pose(
+                        world=world,
+                        config=config,
+                        start_js=approach_js,
+                        world_from_goal_ee=world_from_ee,
+                        motion_gen=motion_gen,
+                        plan_config=constrained_plan_config,
+                    )
+                finally:
+                    motion_gen.world_coll_checker.enable_obstacle(enable=True, name=button)
+                if not end_result.success:
+                    raise RuntimeError(
+                        f"Failed to plan from approach to end for {ground_op.name}. Status: {end_result.status}"
+                    )
+
+            segment_specs = [
+                ("push_retract", retract_result, world_from_retract if retract_result is not None else world_from_ee),
+                ("push_approach", approach_result, world_from_approach),
+                ("push_execute", end_result, world_from_ee),
+            ]
+            for segment_type, result, desired_world_from_ee in segment_specs:
+                if result is None:
+                    continue
+                dt = result.interpolation_dt
+                plan = result.get_interpolated_plan()
+                terminal_world_from_fk = world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0]
+                accum_plans.append(
+                    {
+                        "type": "trajectory",
+                        "plan": plan,
+                        "dt": dt,
+                        "optimized_plan": result.optimized_plan,
+                        "optimized_dt": result.optimized_dt,
+                        "label": ground_op.name,
+                        "debug": _segment_debug_payload(
+                            label=ground_op.name,
+                            segment_type=segment_type,
+                            desired_world_from_ee=desired_world_from_ee,
+                            terminal_world_from_ee=terminal_world_from_fk,
+                            plan_positions=plan.position,
+                            waypoint_index_offset=waypoint_index_offset,
+                            selected_parameter_name=str(pose),
+                        ),
+                    }
+                )
+                last_js = JointState.from_position(plan[-1:].position)
+                ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+                waypoint_index_offset += int(plan.position.shape[0])
 
         # Unsupported
         else:
@@ -394,9 +650,16 @@ def solve_curobo(
     # Plan to retract
     world_from_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
     world_from_retract = world_from_ee @ approach_offset
-    retract_result = motion_gen.plan_single(start_js, Pose.from_matrix(world_from_retract), constrained_plan_config)
+    retract_result = _plan_to_pose(
+        world=world,
+        config=config,
+        start_js=start_js,
+        world_from_goal_ee=world_from_retract,
+        motion_gen=motion_gen,
+        plan_config=constrained_plan_config,
+    )
     if not retract_result.success:
-        raise MotionPlanningError(f"Failed to plan for retract. Status: {retract_result.status}")
+        raise RuntimeError(f"Failed to plan for retract. Status: {retract_result.status}")
     dt = retract_result.interpolation_dt
     plan = retract_result.get_interpolated_plan()
     accum_plans.append(
@@ -407,10 +670,19 @@ def solve_curobo(
             "optimized_plan": result.optimized_plan,
             "optimized_dt": result.optimized_dt,
             "label": "GoToInitial(q0)",
+            "debug": _segment_debug_payload(
+                label="GoToInitial(q0)",
+                segment_type="return_retract",
+                desired_world_from_ee=world_from_retract,
+                terminal_world_from_ee=world.kin_model.get_state(plan.position[-1:]).ee_pose.get_matrix()[0],
+                plan_positions=plan.position,
+                waypoint_index_offset=waypoint_index_offset,
+            ),
         }
     )
     last_js = JointState.from_position(plan[-1:].position)
     ts = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)
+    waypoint_index_offset += int(plan.position.shape[0])
 
     # Plan to go home at the end which we'll assume is q0
     q_last = last_js.position[0]
@@ -420,7 +692,7 @@ def solve_curobo(
     with timer.time(f"{timeline}_planning"):
         result = motion_gen.plan_single_js(js_last, js_home, plan_config)
     if not result.success:
-        raise MotionPlanningError("Failed to plan for going home")
+        raise RuntimeError("Failed to plan for going home")
 
     dt = result.interpolation_dt
     plan = result.get_interpolated_plan()
@@ -432,6 +704,12 @@ def solve_curobo(
             "optimized_plan": result.optimized_plan,
             "optimized_dt": result.optimized_dt,
             "label": "GoToInitial(q0)",
+            "debug": {
+                "label": "GoToInitial(q0)",
+                "segment_type": "go_home_joint",
+                "waypoint_index_offset": int(waypoint_index_offset),
+                "num_waypoints": int(plan.position.shape[0]),
+            },
         }
     )
     _ = visualizer.log_joint_trajectory(plan.position, timeline=timeline, start_time=ts, dt=dt)

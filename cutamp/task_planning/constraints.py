@@ -56,7 +56,3 @@ class ValidPush(Constraint):
     def __init__(self, button, push_pose):
         super().__init__(button, push_pose)
 
-
-class ValidPushStick(Constraint):
-    def __init__(self, button, stick, push_pose):
-        super().__init__(button, stick, push_pose)

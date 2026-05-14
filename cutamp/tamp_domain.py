@@ -23,7 +23,6 @@ from cutamp.task_planning.constraints import (
     Motion,
     StablePlacement,
     ValidPush,
-    ValidPushStick,
 )
 from cutamp.task_planning.costs import GraspCost, TrajectoryLength
 
@@ -62,12 +61,10 @@ all_tamp_fluents = [
     Holding,
     HoldingWithGrasp,
     ButtonPushed,
-    PushedWithStick,
     CanPush,
     IsMovable,
     IsButton,
     IsSurface,
-    IsStick,
     HasNotPickedUp,
     On,
 ]
@@ -136,6 +133,7 @@ Pick = TAMPOperator(
     costs=[GraspCost(obj, grasp)],
 )
 
+
 Place = TAMPOperator(
     "Place",
     [obj, grasp, placement, surface, q],
@@ -177,27 +175,7 @@ Push = TAMPOperator(
     costs=[],
 )
 
-
-PushStick = TAMPOperator(
-    "PushStick",
-    [button, obj, grasp, pose, q],
-    preconditions=[
-        At(q),
-        Holding(obj),
-        HoldingWithGrasp(obj, grasp),
-        IsButton(button),
-        IsStick(obj),
-        CanPush(button),
-        JustMoved(),
-    ],
-    add_effects=[ButtonPushed(button), CanMove(), PushedWithStick(button, obj)],
-    del_effects=[JustMoved(), CanPush(button)],
-    # CFree is automatically handled right now within the operator
-    constraints=[KinematicConstraint(q, pose), ValidPushStick(button, obj, pose)],
-    costs=[],
-)
-
-all_tamp_operators = [MoveFree, MoveHolding, Pick, Place, Push, PushStick]
+all_tamp_operators = [MoveFree, MoveHolding, Pick, Place, Push]
 
 
 def get_initial_state(

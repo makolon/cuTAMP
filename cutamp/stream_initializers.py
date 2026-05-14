@@ -7,6 +7,7 @@ import torch
 from jaxtyping import Float
 
 from cutamp.utils.common import action_4dof_to_mat4x4, action_6dof_to_mat4x4
+from cutamp.utils.math import rotmat_to_euler_xyz
 
 
 def as_mapping(value: object) -> dict[str, object]:
@@ -71,7 +72,7 @@ def grasp_data_to_actions(
     raise ValueError(f"Unsupported grasp_dof: {grasp_dof}")
 
 
-def placement_data_to_actions(placements_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def place_data_to_actions(placements_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if placements_world.ndim == 2 and placements_world.shape[-1] == 4:
         return placements_world, action_4dof_to_mat4x4(placements_world)
 
@@ -87,67 +88,17 @@ def placement_data_to_actions(placements_world: torch.Tensor) -> tuple[torch.Ten
     )
 
 
-def rotmat_to_euler_xyz(rotation: Float[torch.Tensor, "n 3 3"]) -> Float[torch.Tensor, "n 3"]:
-    sy = torch.sqrt(rotation[:, 0, 0] ** 2 + rotation[:, 1, 0] ** 2)
-    singular = sy < 1e-6
+def push_data_to_actions(pushes_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    if pushes_world.ndim == 2 and pushes_world.shape[-1] == 4:
+        return pushes_world, action_4dof_to_mat4x4(pushes_world)
 
-    roll = torch.atan2(rotation[:, 2, 1], rotation[:, 2, 2])
-    pitch = torch.atan2(-rotation[:, 2, 0], sy)
-    yaw = torch.atan2(rotation[:, 1, 0], rotation[:, 0, 0])
+    if pushes_world.ndim == 3 and pushes_world.shape[-2:] == (4, 4):
+        translation = pushes_world[:, :3, 3]
+        yaw = torch.atan2(pushes_world[:, 1, 0], pushes_world[:, 0, 0]).unsqueeze(-1)
+        actions = torch.cat([translation, yaw], dim=1)
+        return actions, action_4dof_to_mat4x4(actions)
 
-    roll_singular = torch.atan2(-rotation[:, 1, 2], rotation[:, 1, 1])
-    yaw_singular = torch.zeros_like(yaw)
-
-    roll = torch.where(singular, roll_singular, roll)
-    yaw = torch.where(singular, yaw_singular, yaw)
-    return torch.stack([roll, pitch, yaw], dim=1)
-
-
-def iter_stream_objects(stream_initializers: Mapping[str, object] | None) -> Iterator[object]:
-    if stream_initializers is None:
-        return
-
-    seen: set[int] = set()
-
-    def walk(value: object) -> Iterator[object]:
-        if value is None:
-            return
-
-        value_id = id(value)
-        if value_id in seen:
-            return
-        seen.add(value_id)
-        yield value
-
-        if isinstance(value, Mapping):
-            for item in value.values():
-                yield from walk(item)
-            return
-
-        if isinstance(value, (list, tuple, set)):
-            for item in value:
-                yield from walk(item)
-            return
-
-        attrs = getattr(value, "__dict__", None)
-        if attrs is not None and isinstance(attrs, dict):
-            for item in attrs.values():
-                yield from walk(item)
-
-    runtime_data = get_stream_data(stream_initializers, "runtime")
-    if runtime_data:
-        yield from walk(runtime_data)
-    yield from walk(stream_initializers)
-
-
-def find_stream_resource_by_methods(
-    stream_initializers: Mapping[str, object] | None,
-    required_methods: tuple[str, ...],
-) -> object | None:
-    if not required_methods:
-        raise ValueError("required_methods must not be empty")
-
-    for candidate in iter_stream_objects(stream_initializers):
-        if all(callable(getattr(candidate, method_name, None)) for method_name in required_methods):
-            return candidate
-    return None
+    raise ValueError(
+        "Expected pushes as either (n, 4) xyz+yaw actions or (n, 4, 4) transforms, "
+        f"got {tuple(pushes_world.shape)}"
+    )
