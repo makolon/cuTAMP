@@ -1,0 +1,80 @@
+# Changelog
+
+## [0.0.5.dev0] - Polaris fork
+
+This release tracks the merge of upstream tiptop-robot/cuTAMP v0.0.4 into the
+polaris fork while preserving the fork-specific features. Versions before this
+entry are upstream releases reproduced verbatim for reference.
+
+### Added (from upstream 0.0.2 – 0.0.4)
+- Test: `tests/test_sphere_overlap.py` — Warp kernel correctness + gradient checks
+- Docs: `docs/profiling-analysis.md` — profiling guide for cuTAMP
+- Upstream CHANGELOG retained below as historical reference
+
+### Fork-only features (NOT in upstream)
+- End-effector-space (Cartesian-linear) motion planning: `cutamp/cartesian_planner.py` plus dispatch in `motion_solver.py` and config fields `motion_planning_space`, `ee_planning_num_waypoints`, `ee_planning_velocity`
+- CUDA graph usage in `tamp_world.py` for repeated motion plan capture
+- Stream initializers module (`cutamp/stream_initializers.py`) — replaces the upstream hard-coded grasps-dict API in `run_cutamp`
+- Removed per-task hardcoded robot configs; robots are externally registered via a plugin (xarm7 / franka_robotiq variants)
+- `setup_cutamp(robot_container=...)` API: explicit dependency injection instead of internal loading
+
+### Deferred merges (planned for follow-up)
+- `tests/test_cost_function.py` from upstream — requires our `run_cutamp` signature to be reconciled with upstream (currently incompatible)
+
+---
+
+## [0.0.4] - 2026-04-14
+
+All changes in this release are from #11 (Warp sphere overlap + FK Pose optimizations).
+
+### Added
+- NVIDIA Warp kernel for `sphere_to_sphere_overlap` with fused cost + analytical gradients, replacing the PyTorch pairwise implementation
+- Concatenated `robot_to_movables` kernel launch — single call over all movable spheres instead of per-object launches
+- `torch.profiler.record_function` annotations through the optimization loop, cost function, and rollout
+- `--torch-profile`, `--torch-profile-output`, `--coll_n_spheres`, `--placement_shrink_dist`, and `--prop_satisfying_break` CLI flags on `cutamp-demo`
+- `blocks_5` environment for benchmarking
+- `tests/test_sphere_overlap.py` correctness + gradient tests for the Warp kernel
+- `docs/profiling-analysis.md` covering how to profile cuTAMP and where time goes today
+
+### Changed
+- Rollout stores `ee_position` and `ee_quaternion` directly from cuRobo FK; `kinematic_costs` no longer round-trips through `Pose.from_matrix`
+- Removed per-step `torch.cuda.synchronize()` in the optimization loop that was forcing CPU-GPU pipeline stalls
+
+### Performance
+
+End-to-end optimization loop wall time, 100 steps, 512 particles, RTX 3090, median of 3 runs. Speedup scales with the size of the movable-sphere pairwise tensor (more objects × more spheres/object → larger win):
+
+| Env | Before (0.0.3) | After (0.0.4) | Speedup |
+|---|---|---|---|
+| `tetris_3` (3 blocks, ~6 sph/obj) | 1.46s | 1.36s | 1.07x |
+| `blocks` (4 blocks, ~50 sph/obj) | 3.43s | 1.68s | 2.04x |
+| `blocks_5` (5 blocks, 50 sph/obj) | 4.98s | 1.87s | 2.66x |
+
+## [0.0.3] - 2026-04-13
+
+### Added
+- `max_motion_refine_attempts` config option to cap the number of satisfying particles tried during motion refinement per skeleton (#9)
+- Retry next plan skeleton when motion refinement fails instead of breaking out of the loop (#9)
+- Test environment and pytest for movable-to-world initial collision fix (#10)
+
+### Fixed
+- Movable-to-world collision now masks initial timesteps per object, matching the movable-to-movable approach, so objects with perception noise at their initial pose are not incorrectly penalized (#10)
+- Vectorized movable-to-world collision into a single batched `collision_fn` call with cached mask for better performance (#10)
+- `break_on_satisfying` no longer exits the skeleton loop when motion planning is enabled but all particles fail (#9)
+
+## [0.0.2] - 2026-04-01
+
+### Added
+- Expose `__version__` in `__init__.py` via `importlib.metadata`
+
+### Fixed
+- Disable CPU pose update to avoid mutating object pose in `TAMPEnvironment`
+
+## [0.0.1] - 2026-03-22
+
+### Added
+- Initial release of cuTAMP from NVLabs — GPU-parallelized TAMP solver with core algorithm, cost functions, rollout, samplers, task planning search, and environment definitions (book shelf, stick button, tetris)
+- Robot support for Franka Panda, FR3, and UR5e with Robotiq 2F-85/140 grippers
+- TiPToP integration: extended algorithm and motion solver, added Franka+Robotiq robot config, OBB collision utilities, new environment assets
+- Return failure reason from planner for better diagnostics
+- Log git status in experiment logger

@@ -506,8 +506,6 @@ class CostFunction:
                 pair_cost_filtered = pair_cost[:, pose_ts:]
                 name1, name2 = pair
                 coll_values[f"{name1}_to_{name2}"] = pair_cost_filtered
-                name1, name2 = pair
-                coll_values[f"{name1}_to_{name2}"] = pair_cost_filtered
 
         coll_cost = {
             "type": "constraint",

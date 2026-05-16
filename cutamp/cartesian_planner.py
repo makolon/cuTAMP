@@ -7,25 +7,6 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-"""End-effector (Cartesian) space motion planning for cuTAMP.
-
-The cuRobo MotionGen-based path planner in :mod:`cutamp.motion_solver` runs joint-space
-trajectory optimization. The resulting motions can curve through joint space and look
-unnatural when replayed visually. This module provides a complementary planner that
-interpolates the end-effector pose linearly between start and goal, then solves IK at
-each waypoint with cuRobo's IK solver. The result mimics
-:class:`curobo.wrap.reacher.motion_gen.MotionGenResult` so the rest of cuTAMP's plan
-emission code can consume it without changes.
-
-IK is solved sequentially with the previous joint configuration provided as both the
-seed and the retract configuration. This is the IK-servoing pattern recommended by
-cuRobo (see ``IKSolver.solve_single`` docstring) and is what keeps each waypoint on
-the same IK branch as the previous one. Solving each waypoint independently with
-random seeds (``seed_config=None``) lets adjacent waypoints converge to different
-branches (e.g., elbow flip, wrist ±pi rollover), which produces a Cartesian-smooth
-EE path but a visibly jerky joint trajectory.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -39,10 +20,6 @@ from curobo.wrap.reacher.motion_gen import MotionGenResult, MotionGenStatus
 from cutamp.config import TAMPConfiguration
 
 _log = logging.getLogger(__name__)
-
-
-def _quat_dot(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
-    return (q_a * q_b).sum(dim=-1, keepdim=True)
 
 
 def _slerp_quat(q_start: torch.Tensor, q_end: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
@@ -123,7 +100,7 @@ def plan_cartesian_linear(
     *,
     start_js: JointState,
     world_from_goal_ee: torch.Tensor,
-    world,  # TAMPWorld; typed-as-object to avoid a cyclic import.
+    world,
     config: TAMPConfiguration,
 ) -> MotionGenResult:
     """Plan a Cartesian-linear EE-space motion from ``start_js`` to ``world_from_goal_ee``.
@@ -146,11 +123,6 @@ def plan_cartesian_linear(
         dtype=dtype,
     )
 
-    # Solve IK sequentially, seeding each waypoint with the joint configuration of the
-    # previous waypoint. This biases the null-space cost toward the prior branch and is
-    # what keeps the joint trajectory continuous across adjacent waypoints. The first
-    # waypoint corresponds (up to FK precision) to ``start_js.position`` by construction,
-    # so we use it directly without re-solving IK to avoid an FK->IK round-trip drift.
     q_start = start_js.position[:1]  # (1, dof)
     positions_list = [q_start]
     prev_q = q_start
@@ -159,11 +131,6 @@ def plan_cartesian_linear(
             position=interpolated_poses.position[waypoint_idx : waypoint_idx + 1],
             quaternion=interpolated_poses.quaternion[waypoint_idx : waypoint_idx + 1],
         )
-        # ``seed_config`` for ``solve_single`` is shape (batch=1, n_seeds=1, dof). The
-        # remaining ``num_seeds - 1`` random seeds are still optimized in parallel and
-        # serve as a safety net when the seeded branch is locally infeasible; the
-        # null-space cost (regularization=True at IK init) biases selection toward the
-        # solution closest to ``retract_config``.
         ik_result = world.ik_solver.solve_single(
             wp_pose,
             retract_config=prev_q,
@@ -183,7 +150,7 @@ def plan_cartesian_linear(
                 success=False,
                 status=MotionGenStatus.IK_FAIL,
             )
-        # ``solution`` is shape (1, num_seeds, dof) for solve_single; index 0 is the best.
+        # solution is shape (1, num_seeds, dof) for solve_single; index 0 is the best.
         prev_q = ik_result.solution[:, 0]
         positions_list.append(prev_q)
 
@@ -219,10 +186,6 @@ def plan_cartesian_linear(
     if not math.isfinite(interpolation_dt):
         interpolation_dt = 0.02
 
-    # Smoothness diagnostics. Logs the per-step joint deltas so regressions in IK
-    # continuity are visible without requiring downstream replay. ``max_step`` is the
-    # most useful single number: a value much larger than ``mean_step`` typically
-    # signals an IK-branch jump at one waypoint.
     if _log.isEnabledFor(logging.DEBUG) and positions.shape[0] >= 2:
         joint_deltas = (positions[1:] - positions[:-1]).abs()
         max_step = float(joint_deltas.max().item())
