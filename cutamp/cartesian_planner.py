@@ -108,18 +108,7 @@ def _interpolate_with_curobo(
     joint_names,
     device: torch.device,
 ) -> tuple[JointState, float]:
-    """Resample IK joint waypoints via cuRobo's batched CUBIC interpolator.
-
-    This matches what ``motion_gen.plan_single_js`` does for the joint-space
-    ``go_home`` segment: cubic spline through the input waypoints, retimed
-    against the robot's joint vel/acc/jerk limits, sampled at
-    ``target_interpolation_dt``. The result is a dense joint trajectory whose
-    derivatives are continuous, which lets the IsaacLab PD controller track
-    it without lag spikes at every IK waypoint boundary.
-
-    Falls back to the raw IK plan (with finite-difference velocities) when
-    the input has fewer than 2 waypoints — there is nothing to interpolate.
-    """
+    """Resample IK joint waypoints via cuRobo's batched CUBIC interpolator."""
 
     n_in = int(positions.shape[0])
     dof = int(positions.shape[1])
@@ -174,7 +163,7 @@ def _interpolate_with_curobo(
         return raw_plan, max(raw_dt, target_interpolation_dt)
 
     dense_positions = out_traj.position[0, :length].to(device)
-    final_dt = float(opt_dt[0].item())
+    final_dt = float(target_interpolation_dt)
 
     if time_dilation_factor is not None and time_dilation_factor > 0.0:
         final_dt = final_dt / float(time_dilation_factor)
