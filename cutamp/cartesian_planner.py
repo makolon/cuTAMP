@@ -14,8 +14,10 @@ import math
 from typing import Optional
 
 import torch
+from curobo.types.base import TensorDeviceType
 from curobo.types.math import Pose
 from curobo.types.state import JointState
+from curobo.util.trajectory import InterpolateType, get_batch_interpolated_trajectory
 from curobo.wrap.reacher.motion_gen import MotionGenResult, MotionGenStatus
 from cutamp.config import TAMPConfiguration
 
@@ -96,6 +98,101 @@ def _build_motion_gen_result(
     )
 
 
+def _interpolate_with_curobo(
+    *,
+    positions: torch.Tensor,
+    raw_dt: float,
+    target_interpolation_dt: float,
+    time_dilation_factor: Optional[float],
+    kin_model,
+    joint_names,
+    device: torch.device,
+) -> tuple[JointState, float]:
+    """Resample IK joint waypoints via cuRobo's batched CUBIC interpolator.
+
+    This matches what ``motion_gen.plan_single_js`` does for the joint-space
+    ``go_home`` segment: cubic spline through the input waypoints, retimed
+    against the robot's joint vel/acc/jerk limits, sampled at
+    ``target_interpolation_dt``. The result is a dense joint trajectory whose
+    derivatives are continuous, which lets the IsaacLab PD controller track
+    it without lag spikes at every IK waypoint boundary.
+
+    Falls back to the raw IK plan (with finite-difference velocities) when
+    the input has fewer than 2 waypoints — there is nothing to interpolate.
+    """
+
+    n_in = int(positions.shape[0])
+    dof = int(positions.shape[1])
+
+    # Finite-difference seed velocity/acceleration/jerk.
+    raw_vel = torch.zeros_like(positions)
+    raw_acc = torch.zeros_like(positions)
+    raw_jerk = torch.zeros_like(positions)
+    if n_in >= 2 and raw_dt > 0.0:
+        raw_vel[:-1] = (positions[1:] - positions[:-1]) / raw_dt
+    if n_in >= 3 and raw_dt > 0.0:
+        raw_acc[:-1] = (raw_vel[1:] - raw_vel[:-1]) / raw_dt
+    if n_in >= 4 and raw_dt > 0.0:
+        raw_jerk[:-1] = (raw_acc[1:] - raw_acc[:-1]) / raw_dt
+
+    raw_plan = JointState(
+        position=positions,
+        velocity=raw_vel,
+        acceleration=raw_acc,
+        jerk=raw_jerk,
+        joint_names=joint_names,
+    )
+
+    if n_in < 2 or raw_dt <= 0.0:
+        # Nothing to interpolate; return a stub plan with zero velocities.
+        return raw_plan, max(raw_dt, target_interpolation_dt)
+
+    joint_limits = kin_model.get_joint_limits()
+    max_vel = joint_limits.velocity[1, :].abs().to(device)
+    max_acc = joint_limits.acceleration[1, :].abs().to(device)
+    max_jerk_t = joint_limits.jerk[1, :].abs().to(device)
+
+    raw_dt_tensor = torch.tensor([raw_dt], device=device, dtype=torch.float32)
+    tensor_args = TensorDeviceType(device=device, dtype=torch.float32)
+
+    out_traj, traj_steps, opt_dt = get_batch_interpolated_trajectory(
+        raw_plan,
+        raw_dt=raw_dt_tensor,
+        interpolation_dt=float(target_interpolation_dt),
+        max_vel=max_vel,
+        max_acc=max_acc,
+        max_jerk=max_jerk_t,
+        kind=InterpolateType.CUBIC,
+        tensor_args=tensor_args,
+        min_dt=float(target_interpolation_dt) * 0.5,
+        max_dt=max(float(raw_dt) * 4.0, float(target_interpolation_dt) * 4.0),
+        optimize_dt=True,
+    )
+
+    length = int(traj_steps[0].item())
+    if length < 2:
+        return raw_plan, max(raw_dt, target_interpolation_dt)
+
+    dense_positions = out_traj.position[0, :length].to(device)
+    final_dt = float(opt_dt[0].item())
+
+    if time_dilation_factor is not None and time_dilation_factor > 0.0:
+        final_dt = final_dt / float(time_dilation_factor)
+
+    dense_vel = torch.zeros_like(dense_positions)
+    if dense_positions.shape[0] >= 2 and final_dt > 0.0:
+        dense_vel[:-1] = (dense_positions[1:] - dense_positions[:-1]) / final_dt
+
+    plan = JointState(
+        position=dense_positions,
+        velocity=dense_vel,
+        acceleration=torch.zeros_like(dense_positions),
+        jerk=torch.zeros_like(dense_positions),
+        joint_names=joint_names,
+    )
+    return plan, final_dt
+
+
 def plan_cartesian_linear(
     *,
     start_js: JointState,
@@ -112,9 +209,16 @@ def plan_cartesian_linear(
 
     device = start_js.position.device
     dtype = start_js.position.dtype
-    num_waypoints = max(int(config.ee_planning_num_waypoints), 2)
 
     world_from_start_ee = world.kin_model.get_state(start_js.position).ee_pose.get_matrix()[0]
+
+    # Distance-adaptive IK waypoint count.
+    ee_distance = float(
+        torch.linalg.norm(world_from_goal_ee[:3, 3] - world_from_start_ee[:3, 3]).item()
+    )
+    target_step = float(config.ee_planning_step_m)
+    num_waypoints = max(2, int(math.ceil(ee_distance / target_step)) + 1)
+
     interpolated_poses = _interpolate_ee_path(
         world_from_start_ee=world_from_start_ee,
         world_from_goal_ee=world_from_goal_ee,
@@ -156,7 +260,6 @@ def plan_cartesian_linear(
 
     positions = torch.cat(positions_list, dim=0)
 
-    # Time-parametrize so that the end-effector moves at roughly the configured velocity.
     segment_lengths = torch.linalg.norm(
         interpolated_poses.position[1:] - interpolated_poses.position[:-1],
         dim=-1,
@@ -164,40 +267,34 @@ def plan_cartesian_linear(
     total_length = float(segment_lengths.sum().item())
     target_velocity = max(float(config.ee_planning_velocity), 1e-3)
     total_time = max(total_length / target_velocity, 1e-3)
-    interpolation_dt = total_time / max(num_waypoints - 1, 1)
+    raw_dt = total_time / max(num_waypoints - 1, 1)
+    if not math.isfinite(raw_dt):
+        raw_dt = 0.02
 
-    # Apply the global time-dilation factor consistently with cuRobo's MotionGen output.
-    if config.time_dilation_factor is not None and config.time_dilation_factor > 0.0:
-        interpolation_dt = interpolation_dt / float(config.time_dilation_factor)
-
-    # Finite-difference velocities; clamped to keep the last sample finite.
-    velocities = torch.zeros_like(positions)
-    if positions.shape[0] >= 2 and interpolation_dt > 0.0:
-        velocities[:-1] = (positions[1:] - positions[:-1]) / interpolation_dt
-
-    plan = JointState(
-        position=positions,
-        velocity=velocities,
-        acceleration=torch.zeros_like(positions),
-        jerk=torch.zeros_like(positions),
+    plan, interpolation_dt = _interpolate_with_curobo(
+        positions=positions,
+        raw_dt=raw_dt,
+        target_interpolation_dt=float(config.ee_planning_interpolation_dt),
+        time_dilation_factor=config.time_dilation_factor,
+        kin_model=world.kin_model,
         joint_names=start_js.joint_names,
+        device=device,
     )
 
-    if not math.isfinite(interpolation_dt):
-        interpolation_dt = 0.02
-
-    if _log.isEnabledFor(logging.DEBUG) and positions.shape[0] >= 2:
-        joint_deltas = (positions[1:] - positions[:-1]).abs()
-        max_step = float(joint_deltas.max().item())
-        mean_step = float(joint_deltas.mean().item())
-        worst_step_idx = int(joint_deltas.max(dim=-1).values.argmax().item())
+    if _log.isEnabledFor(logging.DEBUG):
+        joint_deltas = (plan.position[1:] - plan.position[:-1]).abs()
+        max_step = float(joint_deltas.max().item()) if joint_deltas.numel() else 0.0
+        mean_step = float(joint_deltas.mean().item()) if joint_deltas.numel() else 0.0
         _log.debug(
-            "Cartesian-linear plan smoothness: max_joint_step=%.4f rad, "
-            "mean_joint_step=%.4f rad, worst_at_waypoint=%d/%d",
+            "Cartesian-linear plan: ee_distance=%.3fm, ik_waypoints=%d, "
+            "dense_waypoints=%d, interpolation_dt=%.4fs, "
+            "max_joint_step=%.4f rad, mean_joint_step=%.4f rad",
+            ee_distance,
+            num_waypoints,
+            int(plan.position.shape[0]),
+            interpolation_dt,
             max_step,
             mean_step,
-            worst_step_idx + 1,  # +1 because deltas are between i and i+1
-            num_waypoints,
         )
 
     return _build_motion_gen_result(

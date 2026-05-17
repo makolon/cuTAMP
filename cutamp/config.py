@@ -82,8 +82,6 @@ class TAMPConfiguration:
     # Distance at which collision checking is activated between the world (in cuRobo)
     world_activation_distance: float = 0.0
     # Mask out movable-to-world collision costs at timesteps before each object's first placement.
-    # Objects may initially be in collision with surfaces they rest on due to perception noise.
-    # Set to False in simulation or when debugging to surface genuine environment setup issues.
     mask_initial_movable_world_collision: bool = True
     # Distance at which collision checking is activated between gripper and movables
     gripper_activation_distance: float = 0.0
@@ -106,12 +104,14 @@ class TAMPConfiguration:
 
     ## Motion Planning Space
     # "joint" : cuRobo joint-space TrajOpt (default cuRobo behavior, can produce arcing motions).
-    # "ee"    : Cartesian-linear EE-space planning + batched IK (more direct/human-like motion).
+    # "ee"    : Cartesian-linear EE-space planning + batched IK.
     motion_planning_space: Literal["joint", "ee"] = "joint"
-    # Number of intermediate waypoints generated for one EE-space segment (excluding endpoints).
-    ee_planning_num_waypoints: int = 30
+    # Upper bound on EE step size (m) between adjacent IK waypoints.
+    ee_planning_step_m: float = 0.01
     # Target EE linear velocity (m/s) used to time-parametrize EE-space trajectories.
     ee_planning_velocity: float = 0.25
+    # Target output sample period (sec).
+    ee_planning_interpolation_dt: float = 0.02
 
     ## Visualizer Args
     # Whether to use visualizer, if set to False a Mock is used
@@ -195,11 +195,16 @@ def validate_tamp_config(config: TAMPConfiguration):
     # EE-space planning
     if config.motion_planning_space not in {"joint", "ee"}:
         raise ValueError(f"Invalid motion_planning_space: {config.motion_planning_space}")
-    if config.ee_planning_num_waypoints <= 1:
-        raise ValueError(
-            f"ee_planning_num_waypoints must be > 1, not {config.ee_planning_num_waypoints}"
-        )
     if config.ee_planning_velocity <= 0.0:
         raise ValueError(
             f"ee_planning_velocity must be positive, not {config.ee_planning_velocity}"
+        )
+    if config.ee_planning_step_m <= 0.0:
+        raise ValueError(
+            f"ee_planning_step_m must be positive, not {config.ee_planning_step_m}"
+        )
+    if config.ee_planning_interpolation_dt <= 0.0:
+        raise ValueError(
+            "ee_planning_interpolation_dt must be positive, "
+            f"not {config.ee_planning_interpolation_dt}"
         )
